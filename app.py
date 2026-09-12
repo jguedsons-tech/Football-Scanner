@@ -1717,4 +1717,3 @@ status `NS` ou `TBD`. Portanto, se a API retornar partidas para a data,
 elas deverão aparecer na lista.
         """
     )
-```
