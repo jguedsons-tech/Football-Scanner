@@ -1,3 +1,4 @@
+```python
 import math
 from datetime import date, timedelta, datetime
 
@@ -16,14 +17,20 @@ st.set_page_config(
     layout="wide"
 )
 
-API = "https://v3.football.api-sports.io"
-TIMEOUT = 15
+API_BASE = "https://v3.football.api-sports.io"
+TIMEOUT = 20
 
-# Quantidade máxima de jogos analisados automaticamente
+# Histórico máximo desejado.
+# Se o plano Free não permitir "last", o app tenta buscar por datas.
+HISTORY_DAYS = 30
+
+# Máximo de jogos no scanner automático
 MAX_AUTO_GAMES = 5
 
-# Quantidade de jogos históricos por equipe
-HISTORY_GAMES = 10
+
+# ============================================================
+# SESSION STATE
+# ============================================================
 
 if "games" not in st.session_state:
     st.session_state.games = []
@@ -31,15 +38,18 @@ if "games" not in st.session_state:
 if "analysis" not in st.session_state:
     st.session_state.analysis = None
 
-if "requests_used" not in st.session_state:
-    st.session_state.requests_used = 0
+if "api_calls" not in st.session_state:
+    st.session_state.api_calls = 0
+
+if "last_api_error" not in st.session_state:
+    st.session_state.last_api_error = ""
 
 
 # ============================================================
 # API KEY
 # ============================================================
 
-def key():
+def get_api_key():
     try:
         return st.secrets["api"]["football_key"].strip()
     except Exception:
@@ -47,97 +57,156 @@ def key():
 
 
 # ============================================================
-# FUNÇÃO CENTRAL DA API
+# CHAMADA DA API
 # ============================================================
 
-def api(endpoint, params=None):
+def api_request(endpoint, params=None):
+    """
+    Faz uma chamada para API-Football.
+
+    Retorna:
+        (response, error)
+    """
+
+    api_key = get_api_key()
+
+    if not api_key:
+        return [], "API Key não configurada."
 
     try:
 
         response = requests.get(
-            API + "/" + endpoint,
+            f"{API_BASE}/{endpoint}",
             headers={
-                "x-apisports-key": key()
+                "x-apisports-key": api_key
             },
             params=params or {},
             timeout=TIMEOUT
         )
 
-        st.session_state.requests_used += 1
+        st.session_state.api_calls += 1
 
-        data = response.json()
+        try:
+            data = response.json()
+        except Exception:
+            return [], (
+                f"Resposta inválida da API. "
+                f"HTTP {response.status_code}"
+            )
 
-        errors = data.get("errors", {})
+        errors = data.get("errors")
 
         if errors:
-            return [], errors
+            error_text = str(errors)
+            st.session_state.last_api_error = error_text
+            return [], error_text
+
+        if response.status_code >= 400:
+            return [], (
+                f"Erro HTTP {response.status_code}"
+            )
 
         return data.get("response", []) or [], None
 
-    except requests.RequestException as e:
-        return [], {
-            "connection": str(e)
-        }
+    except requests.exceptions.Timeout:
+        return [], "Tempo limite da API excedido."
+
+    except requests.exceptions.ConnectionError:
+        return [], "Não foi possível conectar à API."
 
     except Exception as e:
-        return [], {
-            "error": str(e)
-        }
+        return [], str(e)
 
 
 # ============================================================
-# BUSCAR JOGOS POR DATA
+# FIXTURES POR DATA
 # ============================================================
 
-@st.cache_data(ttl=600)
-def fixtures(day):
+@st.cache_data(ttl=600, show_spinner=False)
+def get_fixtures(day):
 
-    data, error = api(
+    data, error = api_request(
         "fixtures",
         {
-            "date": day,
+            "date": str(day),
             "timezone": "America/Sao_Paulo"
         }
     )
 
-    return data
+    return data, error
 
 
 # ============================================================
 # HISTÓRICO DA EQUIPE
 #
-# NÃO USA:
+# Primeiro tenta buscar por intervalo de datas.
 #
-# teams/statistics
-# season=2026
+# Isso evita:
+#
+# - teams/statistics
+# - season=2026
+# - last=10
 #
 # ============================================================
 
-@st.cache_data(ttl=3600)
-def team_history(team_id):
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_team_history(team_id):
 
-    data, error = api(
+    end_date = date.today()
+    start_date = end_date - timedelta(days=HISTORY_DAYS)
+
+    data, error = api_request(
         "fixtures",
         {
             "team": team_id,
-            "last": HISTORY_GAMES,
+            "from": start_date.isoformat(),
+            "to": end_date.isoformat(),
             "status": "FT"
         }
     )
 
     if error:
-        return []
+        return [], error
 
-    return data
+    # Apenas partidas finalizadas
+    finished = []
+
+    for game in data:
+
+        status = (
+            game
+            .get("fixture", {})
+            .get("status", {})
+            .get("short", "")
+        )
+
+        if status == "FT":
+            finished.append(game)
+
+    # Ordenar da mais recente para a mais antiga
+    finished.sort(
+        key=lambda x: (
+            x
+            .get("fixture", {})
+            .get("timestamp", 0)
+        ),
+        reverse=True
+    )
+
+    return finished, None
 
 
 # ============================================================
 # FUNÇÕES AUXILIARES
 # ============================================================
 
-def f(value, default=0):
+def safe_float(value, default=0.0):
 
     try:
+
+        if value is None:
+            return default
+
         return float(
             str(value)
             .replace(",", ".")
@@ -148,28 +217,56 @@ def f(value, default=0):
         return default
 
 
-def label(game):
+def game_label(game):
 
-    timestamp = game["fixture"].get("timestamp")
+    timestamp = (
+        game
+        .get("fixture", {})
+        .get("timestamp")
+    )
 
     if timestamp:
-        hour = datetime.fromtimestamp(timestamp).strftime("%H:%M")
+
+        try:
+
+            hour = datetime.fromtimestamp(
+                timestamp
+            ).strftime("%H:%M")
+
+        except Exception:
+
+            hour = "--:--"
+
     else:
+
         hour = "--:--"
 
-    home = game["teams"]["home"]["name"]
-    away = game["teams"]["away"]["name"]
+    home = (
+        game
+        .get("teams", {})
+        .get("home", {})
+        .get("name", "Casa")
+    )
+
+    away = (
+        game
+        .get("teams", {})
+        .get("away", {})
+        .get("name", "Fora")
+    )
 
     return f"{hour} | {home} x {away}"
 
 
 # ============================================================
-# CALCULAR ESTATÍSTICAS DO HISTÓRICO
+# CALCULAR ESTATÍSTICAS
 # ============================================================
 
-def calculate_team_stats(games, team_id, venue=None):
-
-    played = []
+def calculate_team_stats(
+    games,
+    team_id,
+    venue=None
+):
 
     goals_for = []
     goals_against = []
@@ -178,154 +275,229 @@ def calculate_team_stats(games, team_id, venue=None):
     draws = 0
     losses = 0
 
-    over15 = 0
-    over25 = 0
-    under35 = 0
+    over_05 = 0
+    over_15 = 0
+    over_25 = 0
+
+    under_25 = 0
+    under_35 = 0
+    under_45 = 0
 
     btts_yes = 0
 
+    used_games = 0
+
+
     for game in games:
 
-        home_id = game["teams"]["home"]["id"]
-        away_id = game["teams"]["away"]["id"]
+        teams = game.get("teams", {})
+        goals = game.get("goals", {})
 
-        home_goals = game["goals"].get("home")
-        away_goals = game["goals"].get("away")
+        home_team = teams.get("home", {})
+        away_team = teams.get("away", {})
 
-        if home_goals is None or away_goals is None:
+        home_id = home_team.get("id")
+        away_id = away_team.get("id")
+
+        home_goals = goals.get("home")
+        away_goals = goals.get("away")
+
+        if home_goals is None:
+            continue
+
+        if away_goals is None:
             continue
 
         is_home = home_id == team_id
 
+        is_away = away_id == team_id
+
+        if not is_home and not is_away:
+            continue
+
+        # Filtrar mando
         if venue == "home" and not is_home:
             continue
 
-        if venue == "away" and is_home:
+        if venue == "away" and not is_away:
             continue
 
+        # Definir gols do time
         if is_home:
 
-            gf = home_goals
-            ga = away_goals
+            gf = safe_float(home_goals)
+            ga = safe_float(away_goals)
 
         else:
 
-            gf = away_goals
-            ga = home_goals
+            gf = safe_float(away_goals)
+            ga = safe_float(home_goals)
 
-        played.append(game)
+        used_games += 1
 
         goals_for.append(gf)
         goals_against.append(ga)
 
+        # Resultado
         if gf > ga:
+
             wins += 1
 
         elif gf == ga:
+
             draws += 1
 
         else:
+
             losses += 1
 
-        total = gf + ga
+        total_goals = gf + ga
 
-        if total >= 2:
-            over15 += 1
+        # Over
+        if total_goals >= 1:
+            over_05 += 1
 
-        if total >= 3:
-            over25 += 1
+        if total_goals >= 2:
+            over_15 += 1
 
-        if total <= 3:
-            under35 += 1
+        if total_goals >= 3:
+            over_25 += 1
 
+        # Under
+        if total_goals <= 2:
+            under_25 += 1
+
+        if total_goals <= 3:
+            under_35 += 1
+
+        if total_goals <= 4:
+            under_45 += 1
+
+        # Ambas marcam
         if gf > 0 and ga > 0:
             btts_yes += 1
 
-    n = len(played)
 
-    if n == 0:
+    if used_games == 0:
 
         return {
+
             "games": 0,
-            "gf_avg": 0,
-            "ga_avg": 0,
-            "win": 0,
-            "draw": 0,
-            "loss": 0,
-            "over15": 0,
-            "over25": 0,
-            "under35": 0,
-            "btts": 0
+
+            "gf_avg": 0.0,
+
+            "ga_avg": 0.0,
+
+            "win": 0.0,
+
+            "draw": 0.0,
+
+            "loss": 0.0,
+
+            "over05": 0.0,
+
+            "over15": 0.0,
+
+            "over25": 0.0,
+
+            "under25": 0.0,
+
+            "under35": 0.0,
+
+            "under45": 0.0,
+
+            "btts": 0.0
+
         }
+
 
     return {
 
-        "games": n,
+        "games": used_games,
 
-        "gf_avg": sum(goals_for) / n,
+        "gf_avg":
+        sum(goals_for) / used_games,
 
-        "ga_avg": sum(goals_against) / n,
+        "ga_avg":
+        sum(goals_against) / used_games,
 
-        "win": wins / n,
+        "win":
+        wins / used_games,
 
-        "draw": draws / n,
+        "draw":
+        draws / used_games,
 
-        "loss": losses / n,
+        "loss":
+        losses / used_games,
 
-        "over15": over15 / n,
+        "over05":
+        over_05 / used_games,
 
-        "over25": over25 / n,
+        "over15":
+        over_15 / used_games,
 
-        "under35": under35 / n,
+        "over25":
+        over_25 / used_games,
 
-        "btts": btts_yes / n
+        "under25":
+        under_25 / used_games,
+
+        "under35":
+        under_35 / used_games,
+
+        "under45":
+        under_45 / used_games,
+
+        "btts":
+        btts_yes / used_games
+
     }
 
 
 # ============================================================
-# DISTRIBUIÇÃO DE POISSON
+# POISSON
 # ============================================================
 
-def pmf(lam, goals):
+def poisson_pmf(lam, goals):
 
-    lam = max(lam, 0.01)
+    lam = max(float(lam), 0.01)
 
     return (
         math.exp(-lam)
-        * lam ** goals
-        / math.factorial(goals)
+        *
+        (lam ** goals)
+        /
+        math.factorial(goals)
     )
 
 
-def over(lam, line):
+def probability_over(lam, line):
 
-    n = math.floor(line)
+    maximum = math.floor(line)
+
+    probability = 1 - sum(
+        poisson_pmf(lam, i)
+        for i in range(maximum + 1)
+    )
 
     return max(
-        0,
-        min(
-            1,
-            1 - sum(
-                pmf(lam, i)
-                for i in range(n + 1)
-            )
-        )
+        0.0,
+        min(1.0, probability)
     )
 
 
-def under(lam, line):
+def probability_under(lam, line):
+
+    maximum = math.floor(line)
+
+    probability = sum(
+        poisson_pmf(lam, i)
+        for i in range(maximum + 1)
+    )
 
     return max(
-        0,
-        min(
-            1,
-            sum(
-                pmf(lam, i)
-                for i in range(
-                    math.floor(line) + 1
-                )
-            )
-        )
+        0.0,
+        min(1.0, probability)
     )
 
 
@@ -333,204 +505,358 @@ def under(lam, line):
 # 1X2
 # ============================================================
 
-def one_x_two(home_lambda, away_lambda):
+def one_x_two(
+    home_lambda,
+    away_lambda
+):
 
-    probabilities = [0, 0, 0]
+    home_win = 0.0
+    draw = 0.0
+    away_win = 0.0
 
     for home_goals in range(10):
 
         for away_goals in range(10):
 
             probability = (
-                pmf(home_lambda, home_goals)
-                * pmf(away_lambda, away_goals)
+                poisson_pmf(
+                    home_lambda,
+                    home_goals
+                )
+                *
+                poisson_pmf(
+                    away_lambda,
+                    away_goals
+                )
             )
 
             if home_goals > away_goals:
 
-                probabilities[0] += probability
+                home_win += probability
 
             elif home_goals == away_goals:
 
-                probabilities[1] += probability
+                draw += probability
 
             else:
 
-                probabilities[2] += probability
-
-    total = sum(probabilities)
-
-    if total == 0:
-
-        return [0, 0, 0]
-
-    return [
-
-        probabilities[0] / total,
-        probabilities[1] / total,
-        probabilities[2] / total
-
-    ]
+                away_win += probability
 
 
-# ============================================================
-# AMBAS MARCAM
-# ============================================================
+    total = (
+        home_win
+        +
+        draw
+        +
+        away_win
+    )
 
-def btts(home_lambda, away_lambda):
+    if total <= 0:
 
-    return max(
-        0,
-        min(
-            1,
-            1
-            - math.exp(-home_lambda)
-            - math.exp(-away_lambda)
-            + math.exp(
-                -(home_lambda + away_lambda)
-            )
+        return (
+            0.0,
+            0.0,
+            0.0
         )
-    )
 
-
-# ============================================================
-# MODELO DE GOLS
-# ============================================================
-
-def build_model(home_stats, away_stats):
-
-    home_attack = home_stats["gf_avg"]
-
-    home_defense = home_stats["ga_avg"]
-
-    away_attack = away_stats["gf_avg"]
-
-    away_defense = away_stats["ga_avg"]
-
-    # Valores mínimos para evitar modelo zerado
-    if home_attack == 0:
-        home_attack = 1.0
-
-    if home_defense == 0:
-        home_defense = 1.2
-
-    if away_attack == 0:
-        away_attack = 1.0
-
-    if away_defense == 0:
-        away_defense = 1.2
-
-    expected_home = (
-        0.55 * home_attack
-        + 0.30 * away_defense
-        + 0.15 * 1.25
-    )
-
-    expected_away = (
-        0.55 * away_attack
-        + 0.30 * home_defense
-        + 0.15 * 1.05
-    )
 
     return (
+
+        home_win / total,
+
+        draw / total,
+
+        away_win / total
+
+    )
+
+
+# ============================================================
+# BTTS
+# ============================================================
+
+def probability_btts(
+    home_lambda,
+    away_lambda
+):
+
+    probability = (
+
+        1
+
+        - math.exp(-home_lambda)
+
+        - math.exp(-away_lambda)
+
+        + math.exp(
+            -(home_lambda + away_lambda)
+        )
+
+    )
+
+    return max(
+        0.0,
+        min(1.0, probability)
+    )
+
+
+# ============================================================
+# CONSTRUIR MODELO
+# ============================================================
+
+def build_model(
+    home_stats,
+    away_stats
+):
+
+    # Médias reais
+    home_attack = (
+        home_stats["gf_avg"]
+    )
+
+    home_defense = (
+        home_stats["ga_avg"]
+    )
+
+    away_attack = (
+        away_stats["gf_avg"]
+    )
+
+    away_defense = (
+        away_stats["ga_avg"]
+    )
+
+
+    # Valores de segurança
+    if home_attack <= 0:
+        home_attack = 1.0
+
+    if home_defense <= 0:
+        home_defense = 1.2
+
+    if away_attack <= 0:
+        away_attack = 1.0
+
+    if away_defense <= 0:
+        away_defense = 1.2
+
+
+    # Modelo simples combinando
+    # ataque próprio + defesa adversária
+
+    expected_home = (
+
+        0.60 * home_attack
+
+        +
+
+        0.40 * away_defense
+
+    )
+
+
+    expected_away = (
+
+        0.60 * away_attack
+
+        +
+
+        0.40 * home_defense
+
+    )
+
+
+    return (
+
         max(expected_home, 0.20),
+
         max(expected_away, 0.20)
+
     )
 
 
 # ============================================================
-# ANÁLISE DA PARTIDA
+# ANALISAR PARTIDA
 # ============================================================
 
-def analyze(game):
+def analyze_game(game):
 
-    home = game["teams"]["home"]
-
-    away = game["teams"]["away"]
-
-    home_history = team_history(
-        home["id"]
+    home = (
+        game
+        .get("teams", {})
+        .get("home", {})
     )
 
-    away_history = team_history(
-        away["id"]
+    away = (
+        game
+        .get("teams", {})
+        .get("away", {})
     )
 
-    # Estatística geral
+    home_id = home.get("id")
+    away_id = away.get("id")
+
+
+    if not home_id or not away_id:
+
+        return None, (
+            "IDs das equipes não encontrados."
+        )
+
+
+    # Histórico
+    home_history, home_error = (
+        get_team_history(home_id)
+    )
+
+    away_history, away_error = (
+        get_team_history(away_id)
+    )
+
+
+    if home_error:
+
+        return None, (
+            f"Erro no histórico do "
+            f"{home.get('name')}: "
+            f"{home_error}"
+        )
+
+
+    if away_error:
+
+        return None, (
+            f"Erro no histórico do "
+            f"{away.get('name')}: "
+            f"{away_error}"
+        )
+
+
+    # Estatísticas gerais
     home_all = calculate_team_stats(
         home_history,
-        home["id"]
+        home_id
     )
 
     away_all = calculate_team_stats(
         away_history,
-        away["id"]
+        away_id
     )
 
-    # Estatística específica de mando
-    home_venue = calculate_team_stats(
+
+    # Estatísticas por mando
+    home_specific = calculate_team_stats(
         home_history,
-        home["id"],
-        "home"
+        home_id,
+        venue="home"
     )
 
-    away_venue = calculate_team_stats(
+    away_specific = calculate_team_stats(
         away_history,
-        away["id"],
-        "away"
+        away_id,
+        venue="away"
     )
+
 
     # Se houver poucos jogos específicos,
-    # usa estatística geral
-    if home_venue["games"] < 3:
+    # usar o histórico geral.
 
-        home_venue = home_all
+    if home_specific["games"] < 3:
 
-    if away_venue["games"] < 3:
+        home_specific = home_all
 
-        away_venue = away_all
 
-    home_lambda, away_lambda = build_model(
-        home_venue,
-        away_venue
+    if away_specific["games"] < 3:
+
+        away_specific = away_all
+
+
+    # Não há dados suficientes
+    if (
+        home_specific["games"] == 0
+        or
+        away_specific["games"] == 0
+    ):
+
+        return None, (
+            "A API não retornou histórico "
+            "finalizado suficiente para "
+            "uma ou ambas as equipes."
+        )
+
+
+    # Modelo
+    home_lambda, away_lambda = (
+        build_model(
+            home_specific,
+            away_specific
+        )
     )
 
-    probabilities = one_x_two(
-        home_lambda,
+
+    home_win, draw, away_win = (
+        one_x_two(
+            home_lambda,
+            away_lambda
+        )
+    )
+
+
+    total_goals = (
+        home_lambda
+        +
         away_lambda
     )
+
 
     return {
 
         "game": game,
 
-        "home_stats": home_venue,
+        "home_stats":
+        home_specific,
 
-        "away_stats": away_venue,
+        "away_stats":
+        away_specific,
 
-        "home_all": home_all,
+        "home_all":
+        home_all,
 
-        "away_all": away_all,
+        "away_all":
+        away_all,
 
-        "home_lambda": home_lambda,
+        "home_lambda":
+        home_lambda,
 
-        "away_lambda": away_lambda,
+        "away_lambda":
+        away_lambda,
 
-        "probabilities": probabilities,
+        "total_goals":
+        total_goals,
 
-        "btts": btts(
+        "home_win":
+        home_win,
+
+        "draw":
+        draw,
+
+        "away_win":
+        away_win,
+
+        "btts":
+        probability_btts(
             home_lambda,
             away_lambda
         )
 
-    }
+    }, None
 
 
 # ============================================================
-# INTERFACE
+# VERIFICAR API KEY
 # ============================================================
 
-if not key():
+if not get_api_key():
 
     st.title("⚽ Football Scanner")
 
@@ -547,12 +873,15 @@ if not key():
     st.stop()
 
 
-st.title(
-    "⚽ Football Scanner"
-)
+# ============================================================
+# TÍTULO
+# ============================================================
+
+st.title("⚽ Football Scanner")
 
 st.caption(
-    "Estatísticas • Gols • 1X2 • Over/Under • BTTS"
+    "Estatísticas • Gols • Over/Under "
+    "• Ambas Marcam • 1X2"
 )
 
 
@@ -564,24 +893,30 @@ with st.sidebar:
 
     st.header("⚙️ Configurações")
 
-    maxgames = st.slider(
+    max_games = st.slider(
         "Máximo de jogos no scanner",
-        1,
-        MAX_AUTO_GAMES,
-        3
+        min_value=1,
+        max_value=MAX_AUTO_GAMES,
+        value=3
     )
+
 
     st.divider()
 
+
     st.metric(
-        "Consultas nesta sessão",
-        st.session_state.requests_used
+        "Chamadas nesta sessão",
+        st.session_state.api_calls
+    )
+
+
+    st.caption(
+        "Modo econômico"
     )
 
     st.caption(
-        "Versão econômica: sem odds, "
-        "sem predictions e sem "
-        "teams/statistics."
+        "Sem odds • Sem predictions "
+        "• Sem teams/statistics"
     )
 
 
@@ -589,20 +924,15 @@ with st.sidebar:
 # ABAS
 # ============================================================
 
-b1, b2, b3, b4 = st.tabs(
-
-    [
-
-        "🔎 Buscar jogo",
-
-        "🤖 Scanner",
-
-        "📊 Análise",
-
-        "ℹ️ Informações"
-
-    ]
-
+tab_search, tab_scanner, tab_analysis, tab_info = (
+    st.tabs(
+        [
+            "🔎 Buscar jogo",
+            "🤖 Scanner",
+            "📊 Análise",
+            "ℹ️ Informações"
+        ]
+    )
 )
 
 
@@ -610,25 +940,22 @@ b1, b2, b3, b4 = st.tabs(
 # BUSCAR JOGO
 # ============================================================
 
-with b1:
+with tab_search:
 
     selected_date = st.selectbox(
 
         "Data",
 
         [
-
             date.today(),
-
-            date.today()
-            + timedelta(days=1)
-
+            date.today() + timedelta(days=1)
         ],
 
         format_func=lambda x:
         x.strftime("%d/%m/%Y")
 
     )
+
 
     if st.button(
 
@@ -641,52 +968,57 @@ with b1:
     ):
 
         with st.spinner(
-            "Buscando partidas..."
+            "Consultando jogos..."
         ):
 
-            games = fixtures(
+            games, error = get_fixtures(
                 selected_date.isoformat()
             )
 
-            st.session_state.games = [
 
-                game
+        if error:
 
-                for game in games
-
-                if game
-                .get(
-                    "fixture",
-                    {}
-                )
-                .get(
-                    "status",
-                    {}
-                )
-                .get(
-                    "short"
-                )
-
-                in ("NS", "TBD")
-
-            ]
-
-        if st.session_state.games:
-
-            st.success(
-                f"{len(st.session_state.games)} "
-                "jogos encontrados."
+            st.error(
+                f"Erro da API: {error}"
             )
+
+            st.session_state.games = []
+
 
         else:
 
-            st.warning(
-                "Nenhum jogo futuro encontrado."
-            )
+            # IMPORTANTE:
+            # Não filtramos apenas NS/TBD.
+            # Todo jogo retornado será exibido.
+
+            st.session_state.games = games
+
+
+            if games:
+
+                st.success(
+                    f"{len(games)} jogos "
+                    "retornados pela API."
+                )
+
+            else:
+
+                st.warning(
+                    "A API retornou 0 jogos "
+                    f"para {selected_date.strftime('%d/%m/%Y')}."
+                )
+
+                st.info(
+                    "Isso pode ser uma limitação "
+                    "do plano da API ou simplesmente "
+                    "não haver jogos cadastrados "
+                    "para a data."
+                )
+
 
     if st.session_state.games:
 
-        index = st.selectbox(
+        selected_index = st.selectbox(
 
             "Escolha a partida",
 
@@ -697,11 +1029,32 @@ with b1:
             ),
 
             format_func=lambda i:
-            label(
+            game_label(
                 st.session_state.games[i]
             )
 
         )
+
+
+        selected_game = (
+            st.session_state.games[
+                selected_index
+            ]
+        )
+
+
+        status = (
+            selected_game
+            .get("fixture", {})
+            .get("status", {})
+            .get("short", "")
+        )
+
+
+        st.caption(
+            f"Status API: {status}"
+        )
+
 
         if st.button(
 
@@ -713,36 +1066,49 @@ with b1:
 
         ):
 
-            game = (
-                st.session_state.games[
-                    index
-                ]
-            )
-
             with st.spinner(
+
                 "Buscando histórico "
                 "das equipes..."
+
             ):
 
-                st.session_state.analysis = (
-                    analyze(game)
+                result, error = (
+                    analyze_game(
+                        selected_game
+                    )
                 )
 
-            st.success(
-                "Análise concluída."
-            )
+
+            if error:
+
+                st.error(
+                    f"Não foi possível analisar: "
+                    f"{error}"
+                )
+
+            else:
+
+                st.session_state.analysis = (
+                    result
+                )
+
+                st.success(
+                    "Análise concluída!"
+                )
 
 
 # ============================================================
 # SCANNER
 # ============================================================
 
-with b2:
+with tab_scanner:
 
     st.write(
-        "O scanner analisa os primeiros "
-        "jogos disponíveis."
+        "O scanner analisa jogos retornados "
+        "pela API para a data atual."
     )
+
 
     if st.button(
 
@@ -754,274 +1120,310 @@ with b2:
 
     ):
 
-        games = fixtures(
-            date.today().isoformat()
-        )
+        with st.spinner(
+            "Buscando jogos..."
+        ):
 
-        games = [
-
-            game
-
-            for game in games
-
-            if game
-            .get(
-                "fixture",
-                {}
-            )
-            .get(
-                "status",
-                {}
-            )
-            .get(
-                "short"
+            games, error = get_fixtures(
+                date.today().isoformat()
             )
 
-            in ("NS", "TBD")
 
-        ]
+        if error:
 
-        games = games[:maxgames]
-
-        results = []
-
-        progress = st.progress(0)
-
-        for i, game in enumerate(games):
-
-            try:
-
-                result = analyze(game)
-
-                home = (
-                    game["teams"]
-                    ["home"]
-                    ["name"]
-                )
-
-                away = (
-                    game["teams"]
-                    ["away"]
-                    ["name"]
-                )
-
-                p = (
-                    result[
-                        "probabilities"
-                    ]
-                )
-
-                results.append(
-
-                    {
-
-                        "Jogo":
-                        f"{home} x {away}",
-
-                        "Casa":
-                        p[0] * 100,
-
-                        "Empate":
-                        p[1] * 100,
-
-                        "Fora":
-                        p[2] * 100,
-
-                        "BTTS":
-                        result["btts"]
-                        * 100,
-
-                        "Over 1.5":
-                        over(
-                            result[
-                                "home_lambda"
-                            ]
-                            +
-                            result[
-                                "away_lambda"
-                            ],
-                            1.5
-                        )
-                        * 100,
-
-                        "Over 2.5":
-                        over(
-                            result[
-                                "home_lambda"
-                            ]
-                            +
-                            result[
-                                "away_lambda"
-                            ],
-                            2.5
-                        )
-                        * 100
-
-                    }
-
-                )
-
-            except Exception as e:
-
-                st.warning(
-                    f"Erro em "
-                    f"{label(game)}: {e}"
-                )
-
-            progress.progress(
-
-                (i + 1)
-                /
-                max(
-                    1,
-                    len(games)
-                )
-
-            )
-
-        if results:
-
-            dataframe = pd.DataFrame(
-                results
-            )
-
-            st.dataframe(
-
-                dataframe,
-
-                use_container_width=True,
-
-                hide_index=True
-
+            st.error(
+                f"Erro ao buscar jogos: {error}"
             )
 
         else:
 
-            st.info(
-                "Nenhuma partida "
-                "foi analisada."
-            )
+            # Não usar filtro NS/TBD
+            games = games[:max_games]
+
+
+            if not games:
+
+                st.warning(
+                    "A API não retornou jogos "
+                    "para hoje."
+                )
+
+            else:
+
+                progress = st.progress(0)
+
+                results = []
+
+
+                for index, game in enumerate(games):
+
+                    result, game_error = (
+                        analyze_game(
+                            game
+                        )
+                    )
+
+
+                    if result:
+
+                        results.append(
+
+                            {
+
+                                "Jogo":
+                                game_label(game),
+
+                                "Casa %":
+                                round(
+                                    result["home_win"]
+                                    * 100,
+                                    1
+                                ),
+
+                                "Empate %":
+                                round(
+                                    result["draw"]
+                                    * 100,
+                                    1
+                                ),
+
+                                "Fora %":
+                                round(
+                                    result["away_win"]
+                                    * 100,
+                                    1
+                                ),
+
+                                "BTTS %":
+                                round(
+                                    result["btts"]
+                                    * 100,
+                                    1
+                                ),
+
+                                "Over 1.5 %":
+                                round(
+                                    probability_over(
+                                        result[
+                                            "total_goals"
+                                        ],
+                                        1.5
+                                    )
+                                    * 100,
+                                    1
+                                ),
+
+                                "Over 2.5 %":
+                                round(
+                                    probability_over(
+                                        result[
+                                            "total_goals"
+                                        ],
+                                        2.5
+                                    )
+                                    * 100,
+                                    1
+                                ),
+
+                                "Under 3.5 %":
+                                round(
+                                    probability_under(
+                                        result[
+                                            "total_goals"
+                                        ],
+                                        3.5
+                                    )
+                                    * 100,
+                                    1
+                                )
+
+                            }
+
+                        )
+
+
+                    progress.progress(
+
+                        (
+                            index + 1
+                        )
+                        /
+                        len(games)
+
+                    )
+
+
+                if results:
+
+                    dataframe = (
+                        pd.DataFrame(
+                            results
+                        )
+                    )
+
+                    st.dataframe(
+
+                        dataframe,
+
+                        use_container_width=True,
+
+                        hide_index=True
+
+                    )
+
+                else:
+
+                    st.warning(
+                        "Nenhuma partida pôde "
+                        "ser analisada. "
+                        "Verifique se sua API "
+                        "permite consultar "
+                        "histórico por datas."
+                    )
 
 
 # ============================================================
 # ANÁLISE
 # ============================================================
 
-with b3:
+with tab_analysis:
 
     result = (
         st.session_state.analysis
     )
 
+
     if not result:
 
         st.info(
-            "Selecione uma partida "
-            "na aba Buscar jogo."
+            "Busque uma partida e clique "
+            "em Analisar jogo."
         )
+
 
     else:
 
         game = result["game"]
 
         home_name = (
-            game["teams"]
-            ["home"]
-            ["name"]
+            game
+            .get("teams", {})
+            .get("home", {})
+            .get("name", "Casa")
         )
 
         away_name = (
-            game["teams"]
-            ["away"]
-            ["name"]
+            game
+            .get("teams", {})
+            .get("away", {})
+            .get("name", "Fora")
         )
+
 
         st.header(
             f"{home_name} x {away_name}"
         )
 
-        p = (
-            result[
-                "probabilities"
-            ]
+
+        col1, col2, col3, col4 = (
+            st.columns(4)
         )
 
-        columns = st.columns(4)
 
-        columns[0].metric(
+        col1.metric(
+
             "Vitória Casa",
-            f"{p[0]*100:.1f}%"
+
+            f"{result['home_win'] * 100:.1f}%"
+
         )
 
-        columns[1].metric(
+
+        col2.metric(
+
             "Empate",
-            f"{p[1]*100:.1f}%"
+
+            f"{result['draw'] * 100:.1f}%"
+
         )
 
-        columns[2].metric(
+
+        col3.metric(
+
             "Vitória Fora",
-            f"{p[2]*100:.1f}%"
+
+            f"{result['away_win'] * 100:.1f}%"
+
         )
 
-        columns[3].metric(
+
+        col4.metric(
+
             "Ambas Marcam",
-            f"{result['btts']*100:.1f}%"
+
+            f"{result['btts'] * 100:.1f}%"
+
         )
+
 
         st.subheader(
             "⚽ Gols esperados"
         )
 
-        st.write(
 
-            f"**{home_name}:** "
+        g1, g2, g3 = st.columns(3)
+
+
+        g1.metric(
+
+            home_name,
+
             f"{result['home_lambda']:.2f}"
 
         )
 
-        st.write(
 
-            f"**{away_name}:** "
+        g2.metric(
+
+            away_name,
+
             f"{result['away_lambda']:.2f}"
 
         )
 
-        total = (
 
-            result["home_lambda"]
+        g3.metric(
 
-            +
+            "Total",
 
-            result["away_lambda"]
+            f"{result['total_goals']:.2f}"
 
         )
 
-        st.write(
-            f"**Total esperado:** "
-            f"{total:.2f}"
-        )
 
-
-        # -----------------------------------------------
+        # ----------------------------------------------------
         # OVER / UNDER
-        # -----------------------------------------------
+        # ----------------------------------------------------
 
         st.subheader(
-            "📈 Over / Under"
+            "📈 Probabilidades de gols"
         )
 
+
+        total = (
+            result["total_goals"]
+        )
+
+
         goal_rows = []
+
 
         for line in [
 
             0.5,
-
             1.5,
-
             2.5,
-
             3.5,
-
             4.5
 
         ]:
@@ -1030,25 +1432,44 @@ with b3:
 
                 {
 
-                    "Linha": line,
+                    "Linha":
 
-                    "Over":
-                    over(
-                        total,
-                        line
-                    )
-                    * 100,
+                    f"{line}",
 
-                    "Under":
-                    under(
-                        total,
-                        line
+
+                    "Over %":
+
+                    round(
+
+                        probability_over(
+                            total,
+                            line
+                        )
+                        * 100,
+
+                        1
+
+                    ),
+
+
+                    "Under %":
+
+                    round(
+
+                        probability_under(
+                            total,
+                            line
+                        )
+                        * 100,
+
+                        1
+
                     )
-                    * 100
 
                 }
 
             )
+
 
         st.dataframe(
 
@@ -1063,13 +1484,14 @@ with b3:
         )
 
 
-        # -----------------------------------------------
-        # ESTATÍSTICAS
-        # -----------------------------------------------
+        # ----------------------------------------------------
+        # ESTATÍSTICAS RECENTES
+        # ----------------------------------------------------
 
         st.subheader(
             "📊 Estatísticas recentes"
         )
+
 
         home_stats = (
             result["home_stats"]
@@ -1079,12 +1501,13 @@ with b3:
             result["away_stats"]
         )
 
-        stats_rows = [
+
+        statistics_rows = [
 
             {
 
                 "Estatística":
-                "Jogos usados",
+                "Jogos utilizados",
 
                 home_name:
                 home_stats["games"],
@@ -1094,6 +1517,7 @@ with b3:
 
             },
 
+
             {
 
                 "Estatística":
@@ -1101,21 +1525,18 @@ with b3:
 
                 home_name:
                 round(
-                    home_stats[
-                        "gf_avg"
-                    ],
+                    home_stats["gf_avg"],
                     2
                 ),
 
                 away_name:
                 round(
-                    away_stats[
-                        "gf_avg"
-                    ],
+                    away_stats["gf_avg"],
                     2
                 )
 
             },
+
 
             {
 
@@ -1124,21 +1545,18 @@ with b3:
 
                 home_name:
                 round(
-                    home_stats[
-                        "ga_avg"
-                    ],
+                    home_stats["ga_avg"],
                     2
                 ),
 
                 away_name:
                 round(
-                    away_stats[
-                        "ga_avg"
-                    ],
+                    away_stats["ga_avg"],
                     2
                 )
 
             },
+
 
             {
 
@@ -1146,12 +1564,13 @@ with b3:
                 "Vitórias",
 
                 home_name:
-                f"{home_stats['win']*100:.1f}%",
+                f"{home_stats['win'] * 100:.1f}%",
 
                 away_name:
-                f"{away_stats['win']*100:.1f}%"
+                f"{away_stats['win'] * 100:.1f}%"
 
             },
+
 
             {
 
@@ -1159,12 +1578,13 @@ with b3:
                 "Empates",
 
                 home_name:
-                f"{home_stats['draw']*100:.1f}%",
+                f"{home_stats['draw'] * 100:.1f}%",
 
                 away_name:
-                f"{away_stats['draw']*100:.1f}%"
+                f"{away_stats['draw'] * 100:.1f}%"
 
             },
+
 
             {
 
@@ -1172,71 +1592,76 @@ with b3:
                 "Derrotas",
 
                 home_name:
-                f"{home_stats['loss']*100:.1f}%",
+                f"{home_stats['loss'] * 100:.1f}%",
 
                 away_name:
-                f"{away_stats['loss']*100:.1f}%"
+                f"{away_stats['loss'] * 100:.1f}%"
 
             },
+
 
             {
 
                 "Estatística":
-                "Over 1.5",
+                "Over 1.5 histórico",
 
                 home_name:
-                f"{home_stats['over15']*100:.1f}%",
+                f"{home_stats['over15'] * 100:.1f}%",
 
                 away_name:
-                f"{away_stats['over15']*100:.1f}%"
+                f"{away_stats['over15'] * 100:.1f}%"
 
             },
+
 
             {
 
                 "Estatística":
-                "Over 2.5",
+                "Over 2.5 histórico",
 
                 home_name:
-                f"{home_stats['over25']*100:.1f}%",
+                f"{home_stats['over25'] * 100:.1f}%",
 
                 away_name:
-                f"{away_stats['over25']*100:.1f}%"
+                f"{away_stats['over25'] * 100:.1f}%"
 
             },
+
 
             {
 
                 "Estatística":
-                "Under 3.5",
+                "Under 3.5 histórico",
 
                 home_name:
-                f"{home_stats['under35']*100:.1f}%",
+                f"{home_stats['under35'] * 100:.1f}%",
 
                 away_name:
-                f"{away_stats['under35']*100:.1f}%"
+                f"{away_stats['under35'] * 100:.1f}%"
 
             },
+
 
             {
 
                 "Estatística":
-                "Ambas marcam",
+                "BTTS histórico",
 
                 home_name:
-                f"{home_stats['btts']*100:.1f}%",
+                f"{home_stats['btts'] * 100:.1f}%",
 
                 away_name:
-                f"{away_stats['btts']*100:.1f}%"
+                f"{away_stats['btts'] * 100:.1f}%"
 
             }
 
         ]
 
+
         st.dataframe(
 
             pd.DataFrame(
-                stats_rows
+                statistics_rows
             ),
 
             use_container_width=True,
@@ -1250,51 +1675,47 @@ with b3:
 # INFORMAÇÕES
 # ============================================================
 
-with b4:
+with tab_info:
 
     st.subheader(
-        "ℹ️ Versão econômica"
+        "ℹ️ Football Scanner Econômico"
     )
+
 
     st.markdown(
         """
-Esta versão foi criada para reduzir o consumo
-da API-Football.
-
-### Não utiliza
+### Esta versão não utiliza:
 
 - Odds;
 - Betano;
 - Superbet;
 - Betão;
-- Predictions;
+- API Predictions;
 - `teams/statistics`;
-- Consulta forçada de temporada 2026.
+- Temporada 2026.
 
-### Utiliza
+### Esta versão utiliza:
 
-- Jogos disponíveis por data;
-- Histórico recente de cada equipe;
-- Média de gols;
-- Desempenho casa/fora;
+- `fixtures?date=`;
+- Histórico de partidas das equipes;
+- Média de gols marcados;
+- Média de gols sofridos;
+- Desempenho recente;
+- Mandante e visitante;
 - Over/Under;
-- BTTS;
+- Ambas marcam;
 - Modelo de Poisson;
 - Probabilidades 1X2.
 
-### Consumo esperado
+### Importante
 
-Ao buscar jogos:
+As probabilidades apresentadas são estimativas matemáticas.
+Elas não representam garantia de acerto, lucro ou probabilidade real
+superior a 90%.
 
-**aproximadamente 1 consulta.**
-
-Ao analisar uma partida:
-
-**aproximadamente 2 consultas**, uma para cada equipe.
-
-O cache evita repetir consultas durante o período configurado.
-
-⚠️ As probabilidades são estimativas estatísticas.
-Não existe garantia de 90%, lucro ou acerto.
+O aplicativo agora também não elimina automaticamente os jogos por
+status `NS` ou `TBD`. Portanto, se a API retornar partidas para a data,
+elas deverão aparecer na lista.
         """
     )
+```
