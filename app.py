@@ -17,20 +17,20 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
 # ============================================================
-# LER SECRETS DO STREAMLIT
+# LER CHAVE
 # ============================================================
 
 def obter_secret(nome, padrao=""):
 
-    # Primeiro tenta Streamlit Secrets
     try:
-        valor = st.secrets.get(nome, "")
+        valor = st.secrets.get(nome)
+
         if valor:
             return str(valor).strip()
+
     except Exception:
         pass
 
-    # Depois tenta variável de ambiente
     valor = os.getenv(nome, padrao)
 
     if valor:
@@ -50,13 +50,14 @@ OPENROUTER_MODEL = obter_secret(
 
 
 # ============================================================
-# FUNÇÃO PARA TESTAR A CHAVE
+# TESTAR OPENROUTER
 # ============================================================
 
 def testar_openrouter():
 
     if not OPENROUTER_API_KEY:
-        return False, "OPENROUTER_API_KEY não encontrada."
+
+        return False, "Chave não encontrada."
 
     headers = {
         "Authorization": f"Bearer {OPENROUTER_API_KEY}",
@@ -65,21 +66,22 @@ def testar_openrouter():
 
     try:
 
-        resposta = requests.get(
+        r = requests.get(
             "https://openrouter.ai/api/v1/models",
             headers=headers,
             timeout=30
         )
 
-        if resposta.status_code == 200:
+        if r.status_code == 200:
+
             return True, "OpenRouter conectado."
 
         try:
-            erro = resposta.json()
-        except Exception:
-            erro = resposta.text
+            erro = r.json()
+        except:
+            erro = r.text
 
-        return False, f"HTTP {resposta.status_code}: {erro}"
+        return False, f"HTTP {r.status_code}: {erro}"
 
     except Exception as e:
 
@@ -87,86 +89,168 @@ def testar_openrouter():
 
 
 # ============================================================
-# CONSULTAR IA
+# BUSCA WEB
 # ============================================================
 
-def consultar_ia(pergunta):
+def buscar_web(consulta):
+
+    """
+    Usa o mecanismo de busca do próprio OpenRouter.
+
+    NÃO usa:
+    - TheSportsDB
+    - football-data.org
+    - OpenFoot
+    - 5DollarFootballAPI
+    """
+
+    if not OPENROUTER_API_KEY:
+
+        return []
+
+    url = "https://openrouter.ai/api/v1/chat/completions"
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/",
+        "X-Title": "IA Futebol"
+    }
+
+    payload = {
+
+        "model": "openai/gpt-4o-mini",
+
+        "messages": [
+            {
+                "role": "user",
+                "content": consulta
+            }
+        ],
+
+        "plugins": [
+            {
+                "id": "web",
+                "max_results": 10
+            }
+        ],
+
+        "temperature": 0,
+
+        "max_tokens": 6000
+    }
+
+    try:
+
+        r = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=120
+        )
+
+        if r.status_code != 200:
+
+            return [{
+                "erro": r.text
+            }]
+
+        data = r.json()
+
+        choices = data.get(
+            "choices",
+            []
+        )
+
+        if not choices:
+
+            return []
+
+        message = choices[0].get(
+            "message",
+            {}
+        )
+
+        texto = message.get(
+            "content",
+            ""
+        )
+
+        if not texto:
+
+            return []
+
+        return [{
+            "texto": texto
+        }]
+
+    except Exception as e:
+
+        return [{
+            "erro": str(e)
+        }]
+
+
+# ============================================================
+# IA ANALISTA
+# ============================================================
+
+def analisar_com_ia(pergunta, dados_web):
 
     if not OPENROUTER_API_KEY:
 
         return {
             "ok": False,
-            "texto": (
-                "❌ OPENROUTER_API_KEY não encontrada.\n\n"
-                "Configure a chave em Streamlit Cloud → "
-                "Settings → Secrets."
-            )
+            "texto": "❌ Chave OpenRouter não encontrada."
         }
 
-    system_prompt = """
-Você é uma IA especializada em futebol e pesquisa
-estatística de partidas.
+    contexto = ""
 
-RESPONDA SEMPRE EM PORTUGUÊS BRASILEIRO.
+    for item in dados_web:
+
+        if "texto" in item:
+
+            contexto += "\n\n"
+            contexto += item["texto"]
+
+        elif "erro" in item:
+
+            contexto += "\n\nERRO DE PESQUISA:\n"
+            contexto += item["erro"]
+
+
+    # ========================================================
+    # PROMPT
+    # ========================================================
+
+    system_prompt = """
+Você é um ANALISTA PROFISSIONAL DE FUTEBOL.
+
+Responda sempre em português brasileiro.
+
+Você receberá resultados de pesquisa da internet.
+
+Sua tarefa é transformar esses dados em uma análise
+estatística organizada.
 
 ============================================================
 OBJETIVO
 ============================================================
 
-O usuário quer encontrar jogos de futebol e analisar
-os possíveis vencedores.
+Encontrar:
 
-Quando o usuário pedir jogos de hoje ou de uma data:
-
-1. PESQUISE A WEB.
-2. Procure o maior número possível de partidas.
-3. Considere diferentes países e competições.
-4. Não fique limitado às principais ligas.
-5. Não invente partidas.
-
-Procure:
-
-- campeonatos nacionais
-- copas nacionais
-- competições continentais
-- competições internacionais
-- divisões inferiores
-- futebol feminino quando relevante
-- categorias disponíveis nas fontes pesquisadas
+- jogos do dia
+- vencedores projetados
+- empates possíveis
+- probabilidades
+- análise 1X2
+- gols
+- BTTS
+- Over/Under
 
 ============================================================
-DADOS DE CADA JOGO
+1X2
 ============================================================
-
-Para cada partida encontrada, tente obter:
-
-- horário
-- competição
-- país
-- mandante
-- visitante
-- forma recente
-- posição na competição
-- gols marcados
-- gols sofridos
-- desempenho em casa
-- desempenho fora
-- confrontos diretos
-- notícias recentes
-- desfalques
-- contexto da partida
-
-Não invente nenhum desses dados.
-
-Se não encontrar:
-
-"Não encontrado."
-
-============================================================
-PREVISÃO 1X2
-============================================================
-
-Analise:
 
 1 = vitória do mandante
 
@@ -174,19 +258,18 @@ X = empate
 
 2 = vitória do visitante
 
-Para cada jogo informe:
+Para cada jogo:
 
 Mandante: XX%
 Empate: XX%
 Visitante: XX%
 
-Depois:
+Previsão:
 
-Vencedor projetado:
-TIME
-
-A porcentagem é uma ESTIMATIVA da análise e não uma
-garantia de resultado.
+1
+X
+ou
+2
 
 ============================================================
 FORMATO
@@ -194,37 +277,35 @@ FORMATO
 
 Comece com:
 
-⚽ JOGOS DE HOJE
+# ⚽ JOGOS ENCONTRADOS
 
-Depois uma tabela:
+Depois:
 
 | Horário | Competição | Jogo | Previsão | Probabilidade |
-|---------|------------|------|----------|---------------|
+|---|---|---|---|---|
 
-Exemplo:
-
-| 19:00 | Campeonato | Time A x Time B | 1 | 72% |
-
-Depois detalhe os jogos.
+Depois faça uma análise de cada partida.
 
 ============================================================
 VENCEDORES
 ============================================================
 
-Depois da lista completa, crie:
+Depois:
 
-🔥 VENCEDORES PROJETADOS
+# 🏆 VENCEDORES PROJETADOS
 
-Mostre os jogos onde a análise encontrou maior
-probabilidade de vitória.
+Liste os times que apresentarem maior probabilidade
+estatística de vitória.
 
 Formato:
 
-🏆 Time A
-🆚 Time B
+🏆 TIME
+
+🆚 Adversário
 
 Previsão: 1
-Probabilidade: 74%
+
+Probabilidade: 72%
 
 Justificativa:
 ...
@@ -233,63 +314,95 @@ Justificativa:
 EMPATES
 ============================================================
 
-Crie também:
+Depois:
 
-🤝 POSSÍVEIS EMPATES
+# 🤝 POSSÍVEIS EMPATES
 
-Liste os jogos em que X apresentar probabilidade
-relevante.
+Mostre os jogos onde X tenha probabilidade relevante.
+
+============================================================
+JOGOS EQUILIBRADOS
+============================================================
+
+Depois:
+
+# ⚠️ JOGOS EQUILIBRADOS
+
+Mostre partidas onde as probabilidades estejam próximas.
 
 ============================================================
 OUTROS MERCADOS
 ============================================================
 
-Quando houver dados suficientes, analise também:
+Quando houver dados suficientes:
 
 BTTS
-Over 1.5
-Over 2.5
-Under 3.5
-
-Mas a previsão principal deve continuar sendo 1X2.
+OVER 1.5
+OVER 2.5
+UNDER 3.5
 
 ============================================================
-IMPORTANTE
+REGRAS
 ============================================================
 
-Não invente:
+NÃO invente:
 
 - jogos
 - horários
 - resultados
 - estatísticas
-- odds
 - jogadores
 - desfalques
-- probabilidades
+- odds
 
-Diferencie:
+Se um dado não estiver disponível:
 
-DADOS ENCONTRADOS
-de
-ESTIMATIVAS DA IA.
+"Não encontrado."
 
-Se não for possível confirmar todas as partidas do dia,
-informe:
+As probabilidades são estimativas.
 
-"A lista depende da cobertura das fontes pesquisadas e
-pode não representar todas as partidas existentes."
-
-============================================================
-FONTES
-============================================================
-
-Quando pesquisar a web, utilize fontes atuais e confiáveis.
-
-Inclua as fontes relevantes quando possível.
+Nunca diga que uma aposta é garantida.
 
 ============================================================
 """
+
+    user_prompt = f"""
+{pergunta}
+
+============================================================
+DADOS ENCONTRADOS NA PESQUISA WEB
+============================================================
+
+{contexto}
+
+============================================================
+
+Com base nos dados acima:
+
+1. Organize todos os jogos encontrados.
+2. Identifique mandante e visitante.
+3. Analise 1X2.
+4. Calcule uma estimativa de probabilidade.
+5. Mostre os vencedores projetados.
+6. Mostre possíveis empates.
+7. Mostre jogos equilibrados.
+8. Não invente informações.
+"""
+
+    headers = {
+
+        "Authorization":
+            f"Bearer {OPENROUTER_API_KEY}",
+
+        "Content-Type":
+            "application/json",
+
+        "HTTP-Referer":
+            "https://github.com/",
+
+        "X-Title":
+            "IA Futebol"
+    }
 
     payload = {
 
@@ -304,20 +417,9 @@ Inclua as fontes relevantes quando possível.
 
             {
                 "role": "user",
-                "content": pergunta
+                "content": user_prompt
             }
 
-        ],
-
-        # ====================================================
-        # WEB SEARCH
-        # ====================================================
-
-        "plugins": [
-            {
-                "id": "web",
-                "max_results": 10
-            }
         ],
 
         "temperature": 0.15,
@@ -325,24 +427,9 @@ Inclua as fontes relevantes quando possível.
         "max_tokens": 12000
     }
 
-    headers = {
-
-        "Authorization":
-            f"Bearer {OPENROUTER_API_KEY}",
-
-        "Content-Type":
-            "application/json",
-
-        "HTTP-Referer":
-            "https://github.com/",
-
-        "X-Title":
-            "IA Futebol Jogos do Dia"
-    }
-
     try:
 
-        resposta = requests.post(
+        r = requests.post(
 
             OPENROUTER_URL,
 
@@ -357,60 +444,48 @@ Inclua as fontes relevantes quando possível.
         # ERRO
         # ====================================================
 
-        if resposta.status_code != 200:
+        if r.status_code != 200:
 
             try:
-                erro = resposta.json()
-            except Exception:
-                erro = resposta.text
+                erro = r.json()
+            except:
+                erro = r.text
 
             return {
                 "ok": False,
                 "texto": (
-                    f"❌ ERRO OPENROUTER "
-                    f"{resposta.status_code}\n\n"
+                    f"❌ ERRO NA ANÁLISE\n\n"
+                    f"HTTP {r.status_code}\n\n"
                     f"{erro}"
                 )
             }
 
-        # ====================================================
-        # RESPOSTA
-        # ====================================================
+        data = r.json()
 
-        dados = resposta.json()
-
-        escolhas = dados.get(
+        choices = data.get(
             "choices",
             []
         )
 
-        if not escolhas:
+        if not choices:
 
             return {
                 "ok": False,
                 "texto": (
-                    "❌ A OpenRouter não retornou "
-                    "nenhuma resposta."
+                    "❌ A IA não retornou resposta."
                 )
             }
 
-        mensagem = escolhas[0].get(
-            "message",
-            {}
-        )
-
-        texto = mensagem.get(
-            "content",
-            ""
-        )
+        texto = choices[0] \
+            .get("message", {}) \
+            .get("content", "")
 
         if not texto:
 
             return {
                 "ok": False,
                 "texto": (
-                    "❌ A IA retornou uma resposta vazia.\n\n"
-                    + str(mensagem)
+                    "❌ Resposta vazia da IA."
                 )
             }
 
@@ -424,17 +499,7 @@ Inclua as fontes relevantes quando possível.
         return {
             "ok": False,
             "texto": (
-                "⏱️ A consulta demorou mais de "
-                "180 segundos."
-            )
-        }
-
-    except requests.RequestException as e:
-
-        return {
-            "ok": False,
-            "texto": (
-                f"❌ Erro de conexão:\n\n{e}"
+                "⏱️ A análise demorou demais."
             )
         }
 
@@ -442,9 +507,7 @@ Inclua as fontes relevantes quando possível.
 
         return {
             "ok": False,
-            "texto": (
-                f"❌ Erro inesperado:\n\n{e}"
-            )
+            "texto": f"❌ {e}"
         }
 
 
@@ -452,19 +515,22 @@ Inclua as fontes relevantes quando possível.
 # INTERFACE
 # ============================================================
 
-st.title("⚽ IA FUTEBOL")
+st.title(
+    "⚽ IA FUTEBOL"
+)
 
 st.subheader(
-    "🔎 Todos os jogos do dia + vencedores"
+    "🔎 Jogos do dia + vencedores"
 )
 
 st.caption(
-    "Pesquisa e análise realizadas pela IA através da web."
+    "Busca web + análise por IA. "
+    "Sem APIs de futebol."
 )
 
 
 # ============================================================
-# STATUS
+# SIDEBAR
 # ============================================================
 
 with st.sidebar:
@@ -477,31 +543,34 @@ with st.sidebar:
             "🟢 Chave OpenRouter encontrada"
         )
 
-        if st.button(
-            "🔌 Testar conexão",
-            use_container_width=True
-        ):
-
-            ok, mensagem = testar_openrouter()
-
-            if ok:
-                st.success(
-                    "🟢 " + mensagem
-                )
-            else:
-                st.error(
-                    "🔴 " + mensagem
-                )
-
     else:
 
         st.error(
             "🔴 Chave não encontrada"
         )
 
+    if st.button(
+        "🔌 Testar conexão",
+        use_container_width=True
+    ):
+
+        ok, msg = testar_openrouter()
+
+        if ok:
+
+            st.success(
+                "🟢 " + msg
+            )
+
+        else:
+
+            st.error(
+                "🔴 " + msg
+            )
+
     st.divider()
 
-    st.write("### Modelo")
+    st.write("Modelo da análise:")
 
     st.code(
         OPENROUTER_MODEL
@@ -510,34 +579,34 @@ with st.sidebar:
     st.divider()
 
     st.write(
-        "### O bot pesquisa"
-    )
-
-    st.write(
         """
-⚽ Jogos do dia
+O sistema faz:
 
-🌎 Vários países
+🌐 Busca na web
 
-🏆 Competições
+↓
 
-🕐 Horários
+⚽ Lista de jogos
 
-🏠 Mandante
+↓
 
-✈️ Visitante
+📊 Análise estatística
 
-🏆 Vencedor
+↓
 
-📊 Probabilidades
+1X2
+
+↓
+
+🏆 Vencedores
+
+↓
 
 🤝 Empates
 
-⚽ Gols
+↓
 
-🎯 BTTS
-
-📈 Over/Under
+⚠️ Jogos equilibrados
 """
     )
 
@@ -552,29 +621,26 @@ data_atual = datetime.now().strftime(
 
 
 # ============================================================
-# CAMPO DE PESQUISA
+# PESQUISA
 # ============================================================
 
 st.markdown(
-    "## 🔎 Pesquisa"
+    "## 🔎 Pesquisa dos jogos"
 )
 
 pergunta = st.text_area(
 
-    "Digite sua pesquisa",
+    "Digite o que deseja buscar",
 
     value=(
-        f"Pesquise TODOS os jogos de futebol de hoje "
+        f"Pesquise os jogos de futebol de hoje "
         f"({data_atual}). "
-        "Procure o maior número possível de jogos "
+        "Procure o maior número possível de partidas "
         "em diferentes países e competições. "
-        "Traga horário, competição, mandante, visitante "
-        "e faça uma análise 1X2 para cada partida. "
-        "Depois mostre os vencedores projetados e suas "
-        "probabilidades."
+        "Traga horário, competição, mandante e visitante."
     ),
 
-    height=220
+    height=180
 )
 
 
@@ -587,153 +653,172 @@ col1, col2 = st.columns(2)
 
 with col1:
 
-    buscar_todos = st.button(
-
-        "🔎 BUSCAR TODOS OS JOGOS",
-
+    buscar = st.button(
+        "🔎 BUSCAR JOGOS",
         type="primary",
-
         use_container_width=True
     )
 
 
 with col2:
 
-    buscar_vencedores = st.button(
-
+    vencedores = st.button(
         "🏆 BUSCAR VENCEDORES",
-
         use_container_width=True
     )
 
 
 # ============================================================
-# TODOS OS JOGOS
+# EXECUTAR
 # ============================================================
 
-if buscar_todos:
+if buscar or vencedores:
 
     if not OPENROUTER_API_KEY:
 
         st.error(
-            "❌ Configure OPENROUTER_API_KEY "
-            "nos Secrets do Streamlit."
+            "❌ Configure a chave OpenRouter."
         )
 
-    else:
-
-        with st.spinner(
-            "🌐 Pesquisando jogos na web..."
-        ):
-
-            resultado = consultar_ia(
-                pergunta
-            )
-
-        st.divider()
-
-        if resultado["ok"]:
-
-            st.markdown(
-                "## ⚽ JOGOS ENCONTRADOS"
-            )
-
-            st.markdown(
-                resultado["texto"]
-            )
-
-        else:
-
-            st.error(
-                resultado["texto"]
-            )
+        st.stop()
 
 
-# ============================================================
-# SOMENTE VENCEDORES
-# ============================================================
+    # ========================================================
+    # PERGUNTA
+    # ========================================================
 
-if buscar_vencedores:
+    if vencedores:
 
-    pergunta_vencedores = f"""
+        consulta = f"""
+Pesquise na internet os jogos de futebol de hoje
+({data_atual}).
 
-Pesquise na web TODOS os jogos de futebol de hoje
-({data_atual}) que conseguir encontrar.
+Procure o maior número possível de partidas.
 
 Procure diferentes países e competições.
 
-Para cada jogo encontrado:
+Para cada partida encontrada informe:
 
 - horário
 - competição
 - mandante
 - visitante
-- probabilidade mandante
-- probabilidade empate
-- probabilidade visitante
-- vencedor projetado
+- forma recente quando disponível
+- posição quando disponível
+- resultados recentes quando disponíveis
+- notícias relevantes
 
-Depois mostre:
-
-🔥 VENCEDORES PROJETADOS
-
-Organize:
-
-| Horário | Competição | Jogo | Vencedor | Probabilidade |
-
-Inclua somente análises em que exista uma indicação
+Depois identifique quais equipes possuem maior indicação
 estatística de vitória.
 
-Depois explique brevemente os principais dados que
-sustentam cada previsão.
+NÃO invente jogos.
 
-Também mostre:
-
-🤝 POSSÍVEIS EMPATES
-
-⚠️ JOGOS EQUILIBRADOS
-
-Não invente dados.
-
-As probabilidades são estimativas e não garantias.
-
-Informe as fontes pesquisadas quando possível.
+Traga os dados encontrados.
 """
-
-    if not OPENROUTER_API_KEY:
-
-        st.error(
-            "❌ Configure OPENROUTER_API_KEY "
-            "nos Secrets do Streamlit."
-        )
 
     else:
 
-        with st.spinner(
-            "🏆 Pesquisando vencedores..."
-        ):
+        consulta = f"""
+Pesquise na internet os jogos de futebol de hoje
+({data_atual}).
 
-            resultado = consultar_ia(
-                pergunta_vencedores
-            )
+Procure o maior número possível de partidas de futebol
+em diferentes países e competições.
 
-        st.divider()
+Para cada jogo encontrado procure:
 
-        if resultado["ok"]:
+- horário
+- competição
+- país
+- mandante
+- visitante
+- situação da partida
+
+Não invente partidas.
+
+Apresente uma lista organizada dos jogos encontrados.
+"""
+
+
+    # ========================================================
+    # BUSCA
+    # ========================================================
+
+    with st.spinner(
+        "🌐 Pesquisando jogos na web..."
+    ):
+
+        dados = buscar_web(
+            consulta
+        )
+
+
+    # ========================================================
+    # VERIFICAR BUSCA
+    # ========================================================
+
+    if not dados:
+
+        st.error(
+            "❌ Nenhum resultado encontrado na pesquisa."
+        )
+
+        st.stop()
+
+
+    # ========================================================
+    # ANALISAR
+    # ========================================================
+
+    with st.spinner(
+        "🤖 IA analisando os jogos..."
+    ):
+
+        resultado = analisar_com_ia(
+
+            pergunta=(
+                pergunta
+                if not vencedores
+                else
+                f"""
+Analise os jogos de hoje ({data_atual})
+e identifique os vencedores projetados.
+"""
+            ),
+
+            dados_web=dados
+        )
+
+
+    # ========================================================
+    # RESULTADO
+    # ========================================================
+
+    st.divider()
+
+    if resultado["ok"]:
+
+        if vencedores:
 
             st.markdown(
-                "## 🏆 VENCEDORES DO DIA"
-            )
-
-            st.markdown(
-                resultado["texto"]
+                "# 🏆 VENCEDORES DO DIA"
             )
 
         else:
 
-            st.error(
-                resultado["texto"]
+            st.markdown(
+                "# ⚽ JOGOS DO DIA"
             )
+
+        st.markdown(
+            resultado["texto"]
+        )
+
+    else:
+
+        st.error(
+            resultado["texto"]
+        )
 
 
 # ============================================================
@@ -743,6 +828,6 @@ Informe as fontes pesquisadas quando possível.
 st.divider()
 
 st.caption(
-    "⚠️ As probabilidades são estimativas estatísticas. "
-    "Não representam garantia de resultado."
+    "⚠️ As probabilidades são estimativas da IA e "
+    "não representam garantia de resultado."
 )
