@@ -8,324 +8,411 @@ from datetime import datetime
 # ============================================================
 
 st.set_page_config(
-    page_title="⚽ IA Futebol - Jogos do Dia",
+    page_title="⚽ IA Futebol",
     page_icon="⚽",
     layout="wide"
-)
-
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = os.getenv(
-    "OPENROUTER_MODEL",
-    "openrouter/free"
 )
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 
 
 # ============================================================
-# FUNÇÃO OPENROUTER
+# LER SECRETS DO STREAMLIT
+# ============================================================
+
+def obter_secret(nome, padrao=""):
+
+    # Primeiro tenta Streamlit Secrets
+    try:
+        valor = st.secrets.get(nome, "")
+        if valor:
+            return str(valor).strip()
+    except Exception:
+        pass
+
+    # Depois tenta variável de ambiente
+    valor = os.getenv(nome, padrao)
+
+    if valor:
+        return str(valor).strip()
+
+    return padrao
+
+
+OPENROUTER_API_KEY = obter_secret(
+    "OPENROUTER_API_KEY"
+)
+
+OPENROUTER_MODEL = obter_secret(
+    "OPENROUTER_MODEL",
+    "openrouter/free"
+)
+
+
+# ============================================================
+# FUNÇÃO PARA TESTAR A CHAVE
+# ============================================================
+
+def testar_openrouter():
+
+    if not OPENROUTER_API_KEY:
+        return False, "OPENROUTER_API_KEY não encontrada."
+
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json"
+    }
+
+    try:
+
+        resposta = requests.get(
+            "https://openrouter.ai/api/v1/models",
+            headers=headers,
+            timeout=30
+        )
+
+        if resposta.status_code == 200:
+            return True, "OpenRouter conectado."
+
+        try:
+            erro = resposta.json()
+        except Exception:
+            erro = resposta.text
+
+        return False, f"HTTP {resposta.status_code}: {erro}"
+
+    except Exception as e:
+
+        return False, str(e)
+
+
+# ============================================================
+# CONSULTAR IA
 # ============================================================
 
 def consultar_ia(pergunta):
 
     if not OPENROUTER_API_KEY:
+
         return {
             "ok": False,
-            "texto": "❌ OPENROUTER_API_KEY não configurada."
+            "texto": (
+                "❌ OPENROUTER_API_KEY não encontrada.\n\n"
+                "Configure a chave em Streamlit Cloud → "
+                "Settings → Secrets."
+            )
         }
 
     system_prompt = """
-Você é um ANALISTA DE FUTEBOL especializado em pesquisa
-de partidas e análise estatística.
+Você é uma IA especializada em futebol e pesquisa
+estatística de partidas.
 
-RESPONDA SEMPRE EM PORTUGUÊS DO BRASIL.
-
-============================================================
-OBJETIVO PRINCIPAL
-============================================================
-
-Quando o usuário pedir:
-
-- jogos de hoje
-- todos os jogos do dia
-- jogos de determinada data
-- jogos a partir de determinado horário
-- vencedores
-- melhores vencedores
-- partidas para análise
-- jogos de futebol de hoje
-
-VOCÊ DEVE PRIMEIRO PESQUISAR A INTERNET.
-
-Não dependa apenas do seu conhecimento interno.
+RESPONDA SEMPRE EM PORTUGUÊS BRASILEIRO.
 
 ============================================================
-PESQUISA DOS JOGOS
+OBJETIVO
 ============================================================
 
-Quando procurar os jogos do dia:
+O usuário quer encontrar jogos de futebol e analisar
+os possíveis vencedores.
 
-1. Pesquise partidas de futebol da data solicitada.
-2. Procure várias competições.
-3. Procure diferentes países.
-4. Procure:
-   - campeonatos nacionais
-   - copas
-   - competições continentais
-   - competições internacionais
-   - divisões inferiores quando encontradas
-5. Tente obter:
-   - horário
-   - mandante
-   - visitante
-   - competição
-   - país
-   - situação da partida
+Quando o usuário pedir jogos de hoje ou de uma data:
 
-NÃO invente partidas.
+1. PESQUISE A WEB.
+2. Procure o maior número possível de partidas.
+3. Considere diferentes países e competições.
+4. Não fique limitado às principais ligas.
+5. Não invente partidas.
 
-Se não conseguir confirmar uma partida através de fonte
-atual, não coloque como partida confirmada.
+Procure:
+
+- campeonatos nacionais
+- copas nacionais
+- competições continentais
+- competições internacionais
+- divisões inferiores
+- futebol feminino quando relevante
+- categorias disponíveis nas fontes pesquisadas
 
 ============================================================
-ANÁLISE DO VENCEDOR
+DADOS DE CADA JOGO
 ============================================================
 
-Para cada partida encontrada, analise:
+Para cada partida encontrada, tente obter:
 
+- horário
+- competição
+- país
+- mandante
+- visitante
 - forma recente
-- desempenho como mandante
-- desempenho como visitante
+- posição na competição
 - gols marcados
 - gols sofridos
-- confrontos quando disponíveis
-- posição/classificação quando disponível
-- resultados recentes
-- desfalques quando disponíveis
+- desempenho em casa
+- desempenho fora
+- confrontos diretos
 - notícias recentes
-- contexto da competição
-- mando de campo
+- desfalques
+- contexto da partida
 
-Depois estime:
+Não invente nenhum desses dados.
+
+Se não encontrar:
+
+"Não encontrado."
+
+============================================================
+PREVISÃO 1X2
+============================================================
+
+Analise:
 
 1 = vitória do mandante
+
 X = empate
+
 2 = vitória do visitante
 
-IMPORTANTE:
+Para cada jogo informe:
 
-A probabilidade é uma ESTIMATIVA.
-
-Nunca apresente como garantia.
-
-============================================================
-FORMATO OBRIGATÓRIO
-============================================================
-
-Para cada jogo:
-
-⚽ TIME A x TIME B
-🏆 Competição:
-🕐 Horário:
-
-🎯 PREVISÃO:
-→ 1
-ou
-→ X
-ou
-→ 2
-
-📊 Probabilidade estimada:
 Mandante: XX%
 Empate: XX%
 Visitante: XX%
 
-🏆 Vencedor projetado:
+Depois:
+
+Vencedor projetado:
 TIME
 
-📌 Confiança:
-Baixa / Média / Alta
-
-📊 Justificativa:
-resumo objetivo dos dados encontrados.
+A porcentagem é uma ESTIMATIVA da análise e não uma
+garantia de resultado.
 
 ============================================================
-TABELA PRINCIPAL
+FORMATO
 ============================================================
 
-Quando houver muitos jogos, primeiro apresente:
+Comece com:
 
-| Horário | Competição | Jogo | Previsão | Prob. |
-|---------|------------|------|----------|-------|
+⚽ JOGOS DE HOJE
 
-Use:
+Depois uma tabela:
 
-1 = mandante
-X = empate
-2 = visitante
+| Horário | Competição | Jogo | Previsão | Probabilidade |
+|---------|------------|------|----------|---------------|
+
+Exemplo:
+
+| 19:00 | Campeonato | Time A x Time B | 1 | 72% |
+
+Depois detalhe os jogos.
 
 ============================================================
-CLASSIFICAÇÃO DAS ANÁLISES
+VENCEDORES
 ============================================================
 
-Depois da tabela, mostre:
+Depois da lista completa, crie:
 
-🔥 VENCEDORES COM MAIOR PROBABILIDADE
+🔥 VENCEDORES PROJETADOS
 
-Liste os jogos que apresentarem maior probabilidade
-estatística de vitória.
+Mostre os jogos onde a análise encontrou maior
+probabilidade de vitória.
 
-Depois:
+Formato:
 
-⚠️ JOGOS MAIS EQUILIBRADOS
+🏆 Time A
+🆚 Time B
 
-Mostre partidas onde a diferença entre as equipes
-for pequena.
+Previsão: 1
+Probabilidade: 74%
 
-Depois:
+Justificativa:
+...
 
-🎯 POSSÍVEIS EMPATES
+============================================================
+EMPATES
+============================================================
 
-Liste as partidas onde X tiver uma probabilidade
+Crie também:
+
+🤝 POSSÍVEIS EMPATES
+
+Liste os jogos em que X apresentar probabilidade
 relevante.
 
 ============================================================
 OUTROS MERCADOS
 ============================================================
 
-Quando houver dados suficientes, também analise:
+Quando houver dados suficientes, analise também:
 
 BTTS
-OVER 1.5
-OVER 2.5
-UNDER 3.5
+Over 1.5
+Over 2.5
+Under 3.5
 
-Mas NÃO substitua a previsão de vencedor.
+Mas a previsão principal deve continuar sendo 1X2.
 
 ============================================================
-REGRAS IMPORTANTES
+IMPORTANTE
 ============================================================
 
-NÃO invente:
+Não invente:
 
+- jogos
+- horários
 - resultados
 - estatísticas
 - odds
 - jogadores
 - desfalques
-- horários
-- partidas
-- probabilidades apresentadas como fatos
+- probabilidades
 
-Se um dado não puder ser confirmado:
+Diferencie:
 
-"Não encontrado".
-
-Diferencie claramente:
-
-DADO ENCONTRADO
+DADOS ENCONTRADOS
 de
-ESTIMATIVA DA IA.
+ESTIMATIVAS DA IA.
 
-Se o número de partidas encontradas não puder ser
-garantidamente completo, diga:
+Se não for possível confirmar todas as partidas do dia,
+informe:
 
-"Lista baseada nas partidas encontradas nas fontes
-pesquisadas; a cobertura pode não incluir todas as
-competições existentes."
+"A lista depende da cobertura das fontes pesquisadas e
+pode não representar todas as partidas existentes."
 
 ============================================================
-DATA
+FONTES
 ============================================================
 
-Considere a data atual fornecida pelo sistema.
+Quando pesquisar a web, utilize fontes atuais e confiáveis.
 
-Se o usuário disser "hoje", procure a data atual.
-
-Se o usuário fornecer uma data específica, use essa data.
+Inclua as fontes relevantes quando possível.
 
 ============================================================
 """
 
     payload = {
+
         "model": OPENROUTER_MODEL,
 
         "messages": [
+
             {
                 "role": "system",
                 "content": system_prompt
             },
+
             {
                 "role": "user",
                 "content": pergunta
             }
+
         ],
 
-        # Permite à IA pesquisar a web.
-        "tools": [
+        # ====================================================
+        # WEB SEARCH
+        # ====================================================
+
+        "plugins": [
             {
-                "type": "openrouter:web_search",
-                "parameters": {
-                    "max_results": 10,
-                    "search_context_size": "high"
-                }
+                "id": "web",
+                "max_results": 10
             }
         ],
 
         "temperature": 0.15,
+
         "max_tokens": 12000
     }
 
     headers = {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/",
-        "X-Title": "IA Futebol - Jogos do Dia"
+
+        "Authorization":
+            f"Bearer {OPENROUTER_API_KEY}",
+
+        "Content-Type":
+            "application/json",
+
+        "HTTP-Referer":
+            "https://github.com/",
+
+        "X-Title":
+            "IA Futebol Jogos do Dia"
     }
 
     try:
 
-        response = requests.post(
+        resposta = requests.post(
+
             OPENROUTER_URL,
+
             headers=headers,
+
             json=payload,
+
             timeout=180
         )
 
-        if response.status_code != 200:
+        # ====================================================
+        # ERRO
+        # ====================================================
+
+        if resposta.status_code != 200:
 
             try:
-                erro = response.json()
+                erro = resposta.json()
             except Exception:
-                erro = response.text
+                erro = resposta.text
 
             return {
                 "ok": False,
                 "texto": (
-                    f"❌ Erro OpenRouter "
-                    f"{response.status_code}\n\n{erro}"
+                    f"❌ ERRO OPENROUTER "
+                    f"{resposta.status_code}\n\n"
+                    f"{erro}"
                 )
             }
 
-        data = response.json()
+        # ====================================================
+        # RESPOSTA
+        # ====================================================
 
-        choices = data.get("choices", [])
+        dados = resposta.json()
 
-        if not choices:
+        escolhas = dados.get(
+            "choices",
+            []
+        )
+
+        if not escolhas:
+
             return {
                 "ok": False,
-                "texto": "❌ A IA não retornou resposta."
+                "texto": (
+                    "❌ A OpenRouter não retornou "
+                    "nenhuma resposta."
+                )
             }
 
-        message = choices[0].get("message", {})
+        mensagem = escolhas[0].get(
+            "message",
+            {}
+        )
 
-        texto = message.get("content", "")
+        texto = mensagem.get(
+            "content",
+            ""
+        )
 
         if not texto:
 
-            # Algumas respostas podem trazer conteúdo
-            # estruturado diferente.
-            texto = str(message)
+            return {
+                "ok": False,
+                "texto": (
+                    "❌ A IA retornou uma resposta vazia.\n\n"
+                    + str(mensagem)
+                )
+            }
 
         return {
             "ok": True,
@@ -336,111 +423,157 @@ Se o usuário fornecer uma data específica, use essa data.
 
         return {
             "ok": False,
-            "texto": "⏱️ A pesquisa demorou demais."
+            "texto": (
+                "⏱️ A consulta demorou mais de "
+                "180 segundos."
+            )
         }
 
     except requests.RequestException as e:
 
         return {
             "ok": False,
-            "texto": f"❌ Erro de conexão:\n\n{e}"
+            "texto": (
+                f"❌ Erro de conexão:\n\n{e}"
+            )
         }
 
     except Exception as e:
 
         return {
             "ok": False,
-            "texto": f"❌ Erro:\n\n{e}"
+            "texto": (
+                f"❌ Erro inesperado:\n\n{e}"
+            )
         }
 
 
 # ============================================================
-# CABEÇALHO
+# INTERFACE
 # ============================================================
 
 st.title("⚽ IA FUTEBOL")
 
-st.subheader("🔎 Jogos do dia + previsão de vencedores")
+st.subheader(
+    "🔎 Todos os jogos do dia + vencedores"
+)
 
 st.caption(
-    "Pesquisa realizada pela IA através da web. "
-    "Sem TheSportsDB, football-data.org, OpenFoot ou outras APIs de futebol."
+    "Pesquisa e análise realizadas pela IA através da web."
 )
 
 
 # ============================================================
-# SIDEBAR
+# STATUS
 # ============================================================
 
 with st.sidebar:
 
-    st.header("⚙️ Configuração")
+    st.header("⚙️ Status")
 
     if OPENROUTER_API_KEY:
-        st.success("🟢 OpenRouter conectado")
+
+        st.success(
+            "🟢 Chave OpenRouter encontrada"
+        )
+
+        if st.button(
+            "🔌 Testar conexão",
+            use_container_width=True
+        ):
+
+            ok, mensagem = testar_openrouter()
+
+            if ok:
+                st.success(
+                    "🟢 " + mensagem
+                )
+            else:
+                st.error(
+                    "🔴 " + mensagem
+                )
+
     else:
-        st.error("🔴 OpenRouter não configurado")
 
-    st.write("Modelo:")
-
-    st.code(OPENROUTER_MODEL)
-
-    st.divider()
-
-    st.write("### 🔎 Pesquisas")
-
-    st.write("""
-A IA pode pesquisar:
-
-• Jogos de hoje
-• Todos os campeonatos
-• Horários
-• Mandante
-• Visitante
-• Vencedor
-• Empate
-• Probabilidades
-• BTTS
-• Over/Under
-• Forma recente
-• Notícias
-• Desfalques
-""")
+        st.error(
+            "🔴 Chave não encontrada"
+        )
 
     st.divider()
 
-    st.warning(
-        "As probabilidades são estimativas estatísticas "
-        "e não garantem resultados."
+    st.write("### Modelo")
+
+    st.code(
+        OPENROUTER_MODEL
+    )
+
+    st.divider()
+
+    st.write(
+        "### O bot pesquisa"
+    )
+
+    st.write(
+        """
+⚽ Jogos do dia
+
+🌎 Vários países
+
+🏆 Competições
+
+🕐 Horários
+
+🏠 Mandante
+
+✈️ Visitante
+
+🏆 Vencedor
+
+📊 Probabilidades
+
+🤝 Empates
+
+⚽ Gols
+
+🎯 BTTS
+
+📈 Over/Under
+"""
     )
 
 
 # ============================================================
-# DATA AUTOMÁTICA
+# DATA
 # ============================================================
 
-data_atual = datetime.now().strftime("%d/%m/%Y")
+data_atual = datetime.now().strftime(
+    "%d/%m/%Y"
+)
 
 
 # ============================================================
-# BUSCA PRINCIPAL
+# CAMPO DE PESQUISA
 # ============================================================
 
-st.markdown("## 🔎 Buscar jogos")
+st.markdown(
+    "## 🔎 Pesquisa"
+)
 
 pergunta = st.text_area(
-    "O que você quer pesquisar?",
+
+    "Digite sua pesquisa",
+
     value=(
         f"Pesquise TODOS os jogos de futebol de hoje "
-        f"({data_atual}) que conseguir encontrar na web. "
-        "Considere todas as competições e países disponíveis. "
-        "Para cada partida, traga horário, competição, "
-        "mandante, visitante, previsão 1/X/2, probabilidade "
-        "de mandante, empate e visitante, vencedor projetado "
-        "e justificativa estatística. "
-        "Depois faça uma lista dos vencedores com maior "
-        "probabilidade."
+        f"({data_atual}). "
+        "Procure o maior número possível de jogos "
+        "em diferentes países e competições. "
+        "Traga horário, competição, mandante, visitante "
+        "e faça uma análise 1X2 para cada partida. "
+        "Depois mostre os vencedores projetados e suas "
+        "probabilidades."
     ),
+
     height=220
 )
 
@@ -454,108 +587,130 @@ col1, col2 = st.columns(2)
 
 with col1:
 
-    buscar = st.button(
+    buscar_todos = st.button(
+
         "🔎 BUSCAR TODOS OS JOGOS",
+
         type="primary",
+
         use_container_width=True
     )
 
 
 with col2:
 
-    melhores = st.button(
+    buscar_vencedores = st.button(
+
         "🏆 BUSCAR VENCEDORES",
+
         use_container_width=True
     )
 
 
 # ============================================================
-# BUSCA TODOS
+# TODOS OS JOGOS
 # ============================================================
 
-if buscar:
+if buscar_todos:
 
     if not OPENROUTER_API_KEY:
 
         st.error(
-            "Configure OPENROUTER_API_KEY antes de continuar."
+            "❌ Configure OPENROUTER_API_KEY "
+            "nos Secrets do Streamlit."
         )
 
     else:
 
         with st.spinner(
-            "🔎 Pesquisando jogos na web e analisando..."
+            "🌐 Pesquisando jogos na web..."
         ):
 
-            resultado = consultar_ia(pergunta)
+            resultado = consultar_ia(
+                pergunta
+            )
 
         st.divider()
 
         if resultado["ok"]:
 
-            st.markdown("## ⚽ JOGOS ENCONTRADOS")
+            st.markdown(
+                "## ⚽ JOGOS ENCONTRADOS"
+            )
 
-            st.markdown(resultado["texto"])
+            st.markdown(
+                resultado["texto"]
+            )
 
         else:
 
-            st.error(resultado["texto"])
+            st.error(
+                resultado["texto"]
+            )
 
 
 # ============================================================
-# BUSCAR VENCEDORES
+# SOMENTE VENCEDORES
 # ============================================================
 
-if melhores:
+if buscar_vencedores:
 
     pergunta_vencedores = f"""
-Pesquise na internet TODOS os jogos de futebol de hoje
-({data_atual}) que você conseguir encontrar.
 
-Procure o maior número possível de competições e países.
+Pesquise na web TODOS os jogos de futebol de hoje
+({data_atual}) que conseguir encontrar.
 
-Para cada jogo:
+Procure diferentes países e competições.
+
+Para cada jogo encontrado:
 
 - horário
 - competição
 - mandante
 - visitante
-- probabilidade de vitória do mandante
-- probabilidade de empate
-- probabilidade de vitória do visitante
+- probabilidade mandante
+- probabilidade empate
+- probabilidade visitante
 - vencedor projetado
 
-Depois selecione somente os jogos onde exista uma indicação
-estatística clara de vencedor.
+Depois mostre:
 
-Monte uma tabela:
+🔥 VENCEDORES PROJETADOS
+
+Organize:
 
 | Horário | Competição | Jogo | Vencedor | Probabilidade |
 
-Depois faça:
+Inclua somente análises em que exista uma indicação
+estatística de vitória.
 
-🔥 VENCEDORES COM MAIOR PROBABILIDADE
+Depois explique brevemente os principais dados que
+sustentam cada previsão.
 
-Inclua também uma justificativa resumida para cada seleção.
+Também mostre:
 
-Não invente partidas ou estatísticas.
+🤝 POSSÍVEIS EMPATES
 
-Informe as fontes/dados encontrados quando possível.
+⚠️ JOGOS EQUILIBRADOS
 
-Deixe claro que as probabilidades são estimativas e não
-garantias.
+Não invente dados.
+
+As probabilidades são estimativas e não garantias.
+
+Informe as fontes pesquisadas quando possível.
 """
 
     if not OPENROUTER_API_KEY:
 
         st.error(
-            "Configure OPENROUTER_API_KEY antes de continuar."
+            "❌ Configure OPENROUTER_API_KEY "
+            "nos Secrets do Streamlit."
         )
 
     else:
 
         with st.spinner(
-            "🏆 Pesquisando e analisando os vencedores..."
+            "🏆 Pesquisando vencedores..."
         ):
 
             resultado = consultar_ia(
@@ -588,6 +743,6 @@ garantias.
 st.divider()
 
 st.caption(
-    "⚠️ A lista depende da cobertura das fontes encontradas "
-    "pela pesquisa na web. Probabilidades não são garantias."
+    "⚠️ As probabilidades são estimativas estatísticas. "
+    "Não representam garantia de resultado."
 )
