@@ -1,21 +1,36 @@
 import os
 import requests
+import streamlit as st
 
-API_KEY = os.getenv("OPENROUTER_API_KEY")
+# ============================================================
+# CONFIGURAÇÃO
+# ============================================================
+
+st.set_page_config(
+    page_title="Busca IA Gratuita",
+    page_icon="🤖",
+    layout="wide"
+)
+
+API_KEY = os.getenv("OPENROUTER_API_KEY", "")
 MODEL = os.getenv("OPENROUTER_MODEL", "openrouter/free")
 
+# ============================================================
+# FUNÇÃO DA IA
+# ============================================================
 
 def buscar_ia(pergunta):
+
     if not API_KEY:
-        return "ERRO: OPENROUTER_API_KEY não configurada."
+        return "❌ OPENROUTER_API_KEY não configurada."
 
     url = "https://openrouter.ai/api/v1/chat/completions"
 
     headers = {
         "Authorization": f"Bearer {API_KEY}",
         "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/",
-        "X-Title": "Busca IA Gratuita",
+        "HTTP-Referer": "https://scanner-football-2.streamlit.app",
+        "X-Title": "Busca IA Gratuita"
     }
 
     payload = {
@@ -23,79 +38,132 @@ def buscar_ia(pergunta):
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "Você é uma IA de pesquisa e análise. "
-                    "Responda em português brasileiro, "
-                    "de forma objetiva e organizada."
-                ),
+                "content": """
+Você é uma IA de pesquisa e análise.
+
+Responda em português brasileiro.
+
+Seja objetiva, organizada e explique os pontos
+importantes da pergunta do usuário.
+"""
             },
             {
                 "role": "user",
-                "content": pergunta,
-            },
+                "content": pergunta
+            }
         ],
         "temperature": 0.2,
-        "max_tokens": 3000,
+        "max_tokens": 3000
     }
 
     try:
-        response = requests.post(
+
+        resposta = requests.post(
             url,
             headers=headers,
             json=payload,
             timeout=90
         )
 
-        if response.status_code != 200:
-            return f"ERRO HTTP {response.status_code}\n\n{response.text}"
+        if resposta.status_code != 200:
 
-        data = response.json()
+            return (
+                f"❌ Erro HTTP {resposta.status_code}\n\n"
+                f"{resposta.text}"
+            )
 
-        return data["choices"][0]["message"]["content"]
+        dados = resposta.json()
 
-    except requests.RequestException as e:
-        return f"ERRO DE CONEXÃO: {e}"
+        return dados["choices"][0]["message"]["content"]
+
+    except requests.exceptions.Timeout:
+
+        return "⏱️ Tempo limite excedido."
+
+    except requests.exceptions.RequestException as e:
+
+        return f"❌ Erro de conexão: {e}"
 
     except Exception as e:
-        return f"ERRO: {e}"
+
+        return f"❌ Erro: {e}"
 
 
-def main():
+# ============================================================
+# INTERFACE
+# ============================================================
 
-    print("=" * 70)
-    print("🤖 BUSCA IA GRATUITA - OPENROUTER")
-    print("=" * 70)
+st.title("🤖 Busca IA Gratuita")
 
-    if not API_KEY:
-        print("\nOPENROUTER_API_KEY não configurada.")
-        print("Configure a variável antes de executar.")
-        return
+st.caption(
+    "Pesquisa e análise utilizando OpenRouter"
+)
 
-    print("Digite sua pergunta.")
-    print("Digite SAIR para encerrar.\n")
+# ============================================================
+# STATUS
+# ============================================================
 
-    while True:
+with st.sidebar:
 
-        pergunta = input("🔎 Busca: ").strip()
+    st.header("⚙️ Configuração")
 
-        if pergunta.lower() == "sair":
-            print("\nEncerrado.")
-            break
+    if API_KEY:
 
-        if not pergunta:
-            continue
+        st.success("🟢 OpenRouter conectado")
 
-        print("\nConsultando IA...\n")
+    else:
 
-        resposta = buscar_ia(pergunta)
+        st.error("🔴 OpenRouter não configurado")
 
-        print("=" * 70)
-        print("RESPOSTA")
-        print("=" * 70)
-        print(resposta)
-        print("=" * 70)
-        print()
+    st.write("Modelo:")
+    st.code(MODEL)
 
+# ============================================================
+# CAMPO DE BUSCA
+# ============================================================
 
-if __name__ == "__main__":
-    main()
+pergunta = st.text_area(
+    "🔎 O que você quer pesquisar?",
+    placeholder=(
+        "Exemplo:\n"
+        "Analise Juventus x Inter de Milão\n\n"
+        "ou\n\n"
+        "Quais são os principais acontecimentos "
+        "econômicos desta semana?"
+    ),
+    height=150
+)
+
+# ============================================================
+# BOTÃO
+# ============================================================
+
+if st.button(
+    "🤖 Consultar IA",
+    type="primary",
+    use_container_width=True
+):
+
+    if not pergunta.strip():
+
+        st.warning("Digite uma pergunta.")
+
+    else:
+
+        with st.spinner("Consultando a IA..."):
+
+            resposta = buscar_ia(pergunta)
+
+        st.subheader("📊 Resposta")
+
+        st.markdown(resposta)
+
+# ============================================================
+# INFORMAÇÕES
+# ============================================================
+
+st.divider()
+
+st.caption(
+    "Modelo utilizado: openrouter/free"
+)
