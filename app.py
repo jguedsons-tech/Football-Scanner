@@ -1,15 +1,3 @@
-# ============================================================
-# BOT DE GOLS — MONITORAMENTO RÁPIDO
-# Baseado no Global Football Scanner
-#
-# Uso:
-#   python bot_gols_instantaneo.py
-#
-# O bot importa as funções/APIs do seu scanner original,
-# consulta as fontes em paralelo e alerta somente quando
-# detecta aumento real no placar.
-# ============================================================
-
 import os
 import time
 import threading
