@@ -1,214 +1,128 @@
 import os
-import re
 import time
-import unicodedata
-import threading
+import hashlib
 from datetime import datetime, timezone
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 import streamlit as st
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
 # ============================================================
 # CONFIGURAÇÃO
 # ============================================================
 
+APP_TITLE = "Football Scanner — Multi-Source Live"
+
+REQUEST_TIMEOUT = 8
+OPENROUTER_TIMEOUT = 15
+
+DEFAULT_INTERVAL = 15
+MIN_INTERVAL = 5
+MAX_INTERVAL = 300
+
+SOURCE_WORKERS = 6
+
+# Após 403, não ficar martelando a ESPN.
+ESPN_COOLDOWN = 120
+
+# Ligas ESPN públicas
+ESPN_LEAGUES = [
+    "eng.1",
+    "esp.1",
+    "ita.1",
+    "ger.1",
+    "fra.1",
+    "bra.1",
+    "arg.1",
+    "mex.1",
+    "usa.1",
+    "col.1",
+    "chi.1",
+    "bol.1",
+    "par.1",
+    "uru.1",
+    "per.1",
+]
+
+
+# ============================================================
+# STREAMLIT
+# ============================================================
+
 st.set_page_config(
-    page_title="Football Goal Race",
+    page_title=APP_TITLE,
     page_icon="⚽",
     layout="wide",
 )
 
-# ------------------------------------------------------------
+
+# ============================================================
 # CHAVES
-# ------------------------------------------------------------
-# IMPORTANTE:
-# Em produção, prefira colocar essas chaves no Streamlit Secrets.
-#
-# Exemplo:
-#
-# [api]
-# football_data = "..."
-# fivedollar = "..."
-# thesportsdb = "123"
-# openfoot = "..."
-# openrouter = "..."
-#
-# [telegram]
-# bot_token = "..."
-# chat_id = "..."
-#
-# O código abaixo aceita também variáveis de ambiente.
+# ============================================================
 
-FOOTBALL_DATA_API_TOKEN = os.getenv(
-    "FOOTBALL_DATA_API_TOKEN",
-    ""
+def get_secret(name, default=""):
+    """
+    Primeiro tenta Streamlit Secrets.
+    Depois tenta variável de ambiente.
+    """
+
+    try:
+        value = st.secrets.get(name)
+
+        if value:
+            return str(value).strip()
+
+    except Exception:
+        pass
+
+    return os.getenv(name, default).strip()
+
+
+FOOTBALL_DATA_TOKEN = get_secret(
+    "FOOTBALL_DATA_API_TOKEN"
 )
 
-FIVEDOLLAR_FOOTBALL_API_KEY = os.getenv(
-    "FIVEDOLLAR_FOOTBALL_API_KEY",
-    ""
+FIVEDOLLAR_KEY = get_secret(
+    "FIVEDOLLAR_FOOTBALL_API_KEY"
 )
 
-THESPORTSDB_API_KEY = os.getenv(
-    "THESPORTSDB_API_KEY",
-    "123"
+THESPORTSDB_KEY = get_secret(
+    "THESPORTSDB_API_KEY"
 )
 
-OPENFOOT_API_KEY = os.getenv(
-    "OPENFOOT_API_KEY",
-    ""
+OPENFOOT_KEY = get_secret(
+    "OPENFOOT_API_KEY"
 )
 
-OPENROUTER_API_KEY = os.getenv(
-    "OPENROUTER_API_KEY",
-    ""
+API_FOOTBALL_KEY = get_secret(
+    "API_FOOTBALL_KEY"
 )
 
-OPENROUTER_MODEL = os.getenv(
+OPENROUTER_API_KEY = get_secret(
+    "OPENROUTER_API_KEY"
+)
+
+OPENROUTER_MODEL = get_secret(
     "OPENROUTER_MODEL",
     "openrouter/free"
 )
 
-TELEGRAM_BOT_TOKEN = os.getenv(
-    "TELEGRAM_BOT_TOKEN",
-    ""
+TELEGRAM_BOT_TOKEN = get_secret(
+    "TELEGRAM_BOT_TOKEN"
 )
 
-TELEGRAM_CHAT_ID = os.getenv(
-    "TELEGRAM_CHAT_ID",
-    ""
-)
-
-
-# ============================================================
-# TENTAR STREAMLIT SECRETS
-# ============================================================
-
-def secret_value(section, key, default=""):
-    try:
-        if section in st.secrets:
-            value = st.secrets[section].get(key, default)
-            if value:
-                return value
-    except Exception:
-        pass
-
-    return default
-
-
-FOOTBALL_DATA_API_TOKEN = secret_value(
-    "api",
-    "football_data",
-    FOOTBALL_DATA_API_TOKEN
-)
-
-FIVEDOLLAR_FOOTBALL_API_KEY = secret_value(
-    "api",
-    "fivedollar",
-    FIVEDOLLAR_FOOTBALL_API_KEY
-)
-
-THESPORTSDB_API_KEY = secret_value(
-    "api",
-    "thesportsdb",
-    THESPORTSDB_API_KEY
-)
-
-OPENFOOT_API_KEY = secret_value(
-    "api",
-    "openfoot",
-    OPENFOOT_API_KEY
-)
-
-OPENROUTER_API_KEY = secret_value(
-    "api",
-    "openrouter",
-    OPENROUTER_API_KEY
-)
-
-OPENROUTER_MODEL = secret_value(
-    "api",
-    "openrouter_model",
-    OPENROUTER_MODEL
-)
-
-TELEGRAM_BOT_TOKEN = secret_value(
-    "telegram",
-    "bot_token",
-    TELEGRAM_BOT_TOKEN
-)
-
-TELEGRAM_CHAT_ID = secret_value(
-    "telegram",
-    "chat_id",
-    TELEGRAM_CHAT_ID
+TELEGRAM_CHAT_ID = get_secret(
+    "TELEGRAM_CHAT_ID"
 )
 
 
 # ============================================================
-# CONSTANTES
+# SESSION STATE
 # ============================================================
 
-TIMEOUT = 8
-
-DEFAULT_REFRESH = 5
-
-ESPN_BASE = (
-    "https://site.web.api.espn.com"
-    "/apis/site/v2/sports/soccer"
-)
-
-FIVEDOLLAR_BASE = (
-    "https://api.5dollarfootballapi.com/v1"
-)
-
-OPENFOOT_BASE = (
-    "https://openfootapi.com/v1"
-)
-
-FOOTBALL_DATA_BASE = (
-    "https://api.football-data.org/v4"
-)
-
-THESPORTSDB_BASE = (
-    "https://www.thesportsdb.com/api/v2/json"
-)
-
-
-# ============================================================
-# LIGAS ESPN
-# ============================================================
-
-ESPN_LEAGUES = {
-    "Brasil Série A": "bra.1",
-    "Brasil Série B": "bra.2",
-    "Inglaterra Premier League": "eng.1",
-    "Espanha LaLiga": "esp.1",
-    "Itália Serie A": "ita.1",
-    "Alemanha Bundesliga": "ger.1",
-    "França Ligue 1": "fra.1",
-    "Argentina": "arg.1",
-    "México Liga MX": "mex.1",
-    "Colômbia": "col.1",
-    "Chile": "chi.1",
-    "Portugal": "por.1",
-    "Holanda Eredivisie": "ned.1",
-    "Turquia": "tur.1",
-    "Estados Unidos MLS": "usa.1",
-}
-
-
-# ============================================================
-# ESTADO
-# ============================================================
-
-if "score_state" not in st.session_state:
-    st.session_state.score_state = {}
-
-if "initialized" not in st.session_state:
-    st.session_state.initialized = False
+if "score_cache" not in st.session_state:
+    st.session_state.score_cache = {}
 
 if "goal_history" not in st.session_state:
     st.session_state.goal_history = []
@@ -217,1531 +131,2266 @@ if "source_stats" not in st.session_state:
     st.session_state.source_stats = {}
 
 if "espn_block_until" not in st.session_state:
-    st.session_state.espn_block_until = 0.0
+    st.session_state.espn_block_until = 0
+
+if "analysis_cache" not in st.session_state:
+    st.session_state.analysis_cache = {}
+
+if "sent_goal_ids" not in st.session_state:
+    st.session_state.sent_goal_ids = set()
 
 if "last_cycle" not in st.session_state:
     st.session_state.last_cycle = None
-
-if "cycle_count" not in st.session_state:
-    st.session_state.cycle_count = 0
 
 
 # ============================================================
 # UTILITÁRIOS
 # ============================================================
 
-def agora_str():
-    return datetime.now().strftime("%H:%M:%S.%f")[:-3]
+def agora():
+    return datetime.now().strftime("%H:%M:%S")
 
 
-def normalizar_texto(texto):
-    if not texto:
+def utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def safe_int(value, default=0):
+
+    try:
+
+        if value is None:
+            return default
+
+        if value == "":
+            return default
+
+        return int(float(value))
+
+    except Exception:
+
+        return default
+
+
+def text(value):
+
+    if value is None:
         return ""
 
-    texto = str(texto)
-
-    texto = unicodedata.normalize(
-        "NFKD",
-        texto
-    ).encode(
-        "ascii",
-        "ignore"
-    ).decode(
-        "ascii"
-    )
-
-    texto = texto.lower()
-
-    texto = re.sub(
-        r"[^a-z0-9]+",
-        " ",
-        texto
-    )
-
-    return " ".join(texto.split())
+    return str(value).strip()
 
 
-def nome_jogo(home, away):
-    return f"{home} x {away}"
+def path(obj, *keys):
+
+    current = obj
+
+    for key in keys:
+
+        if isinstance(current, dict):
+
+            current = current.get(key)
+
+        elif isinstance(current, (list, tuple)):
+
+            if isinstance(key, int) and 0 <= key < len(current):
+                current = current[key]
+            else:
+                return None
+
+        else:
+
+            return None
+
+    return current
 
 
-def chave_jogo(home, away):
-    return (
-        normalizar_texto(home),
-        normalizar_texto(away)
-    )
+def first(obj, keys, default=None):
+
+    if not isinstance(obj, dict):
+        return default
+
+    for key in keys:
+
+        value = obj.get(key)
+
+        if value not in (None, ""):
+            return value
+
+    return default
 
 
-def score_valido(home_score, away_score):
-    try:
-        if home_score is None:
-            home_score = 0
+def parse_score(value):
 
-        if away_score is None:
-            away_score = 0
+    if isinstance(value, dict):
 
-        return (
-            int(home_score),
-            int(away_score)
-        )
-    except Exception:
-        return None
-
-
-def status_live(status):
-    if status is None:
-        return True
-
-    s = str(status).upper()
-
-    encerrados = {
-        "FT",
-        "AET",
-        "PEN",
-        "FINISHED",
-        "FINISH",
-        "ENDED",
-        "CANCELLED",
-        "CANCELED",
-        "POSTPONED",
-        "PST",
-    }
-
-    return s not in encerrados
-
-
-def http_get(
-    url,
-    headers=None,
-    params=None,
-    timeout=TIMEOUT
-):
-    inicio = time.perf_counter()
-
-    try:
-        resposta = requests.get(
-            url,
-            headers=headers or {},
-            params=params or {},
-            timeout=timeout
+        home = first(
+            value,
+            [
+                "home",
+                "home_score",
+                "homeScore",
+                "local",
+            ],
         )
 
-        recebido = time.perf_counter()
+        away = first(
+            value,
+            [
+                "away",
+                "away_score",
+                "awayScore",
+                "visitor",
+            ],
+        )
 
-        return {
-            "ok": resposta.ok,
-            "status": resposta.status_code,
-            "json": (
-                resposta.json()
-                if resposta.content
-                else {}
-            ),
-            "inicio": inicio,
-            "recebido": recebido,
-            "duracao": recebido - inicio,
-            "erro": None,
-        }
+        if home is not None and away is not None:
+            return (
+                safe_int(home),
+                safe_int(away),
+            )
 
-    except Exception as e:
-        recebido = time.perf_counter()
+    if isinstance(value, (list, tuple)):
 
-        return {
-            "ok": False,
-            "status": 0,
-            "json": {},
-            "inicio": inicio,
-            "recebido": recebido,
-            "duracao": recebido - inicio,
-            "erro": str(e),
-        }
+        if len(value) >= 2:
+
+            return (
+                safe_int(value[0]),
+                safe_int(value[1]),
+            )
+
+    return 0, 0
 
 
-# ============================================================
-# NORMALIZAÇÃO PADRÃO
-# ============================================================
-
-def evento(
+def create_id(
     source,
+    raw_id,
+    home,
+    away,
+    kickoff="",
+):
+
+    if raw_id not in (None, ""):
+
+        return f"{source}:{raw_id}"
+
+    base = (
+        f"{home}|{away}|{kickoff}"
+        .lower()
+        .encode()
+    )
+
+    digest = hashlib.sha1(base).hexdigest()[:16]
+
+    return f"{source}:{digest}"
+
+
+# ============================================================
+# EVENTO PADRONIZADO
+# ============================================================
+
+def event(
+    source,
+    raw_id,
     home,
     away,
     home_score,
     away_score,
-    status="LIVE",
-    minute=None,
-    league=None,
-    external_id=None,
-    recebido=None,
-    duracao=None
+    status="",
+    minute="",
+    kickoff="",
+    league="",
+    country="",
+    raw=None,
 ):
-    score = score_valido(
-        home_score,
-        away_score
-    )
 
-    if not score:
-        return None
+    home = text(home) or "Casa"
+    away = text(away) or "Fora"
+
+    home_score = safe_int(home_score)
+    away_score = safe_int(away_score)
 
     return {
+
+        "id": create_id(
+            source,
+            raw_id,
+            home,
+            away,
+            kickoff,
+        ),
+
+        "raw_id": raw_id,
+
         "source": source,
-        "home": str(home or "").strip(),
-        "away": str(away or "").strip(),
-        "home_score": score[0],
-        "away_score": score[1],
-        "status": status,
-        "minute": minute,
-        "league": league or "",
-        "external_id": external_id,
-        "received_at": recebido,
-        "duration": duracao,
+
+        "home": home,
+
+        "away": away,
+
+        "home_score": home_score,
+
+        "away_score": away_score,
+
+        "score": (
+            f"{home_score}-{away_score}"
+        ),
+
+        "status": text(status),
+
+        "minute": text(minute),
+
+        "kickoff": text(kickoff),
+
+        "league": text(league),
+
+        "country": text(country),
+
+        # IMPORTANTE:
+        # instante absoluto de chegada da resposta.
+        "received_at": time.perf_counter(),
+
+        "received_wall": utc_now(),
+
+        "raw": raw,
     }
+
+
+# ============================================================
+# HTTP
+# ============================================================
+
+def get_json(
+    url,
+    headers=None,
+    params=None,
+    timeout=REQUEST_TIMEOUT,
+):
+
+    response = requests.get(
+        url,
+        headers=headers or {},
+        params=params or {},
+        timeout=timeout,
+    )
+
+    try:
+
+        data = response.json()
+
+    except Exception:
+
+        data = {}
+
+    return response, data
+
+
+def source_result(
+    name,
+    events=None,
+    ok=True,
+    status=None,
+    error="",
+    elapsed=0,
+):
+
+    return {
+
+        "source": name,
+
+        "events": events or [],
+
+        "ok": ok,
+
+        "status": status,
+
+        "error": error,
+
+        "elapsed": elapsed,
+
+        "received_at": time.perf_counter(),
+    }
+
+
+# ============================================================
+# ESTATÍSTICAS
+# ============================================================
+
+def register_source(result):
+
+    name = result["source"]
+
+    stats = st.session_state.source_stats.setdefault(
+        name,
+        {
+            "calls": 0,
+            "ok": 0,
+            "errors": 0,
+            "last_status": None,
+            "last_error": "",
+            "last_ms": 0,
+        },
+    )
+
+    stats["calls"] += 1
+
+    stats["last_status"] = result.get(
+        "status"
+    )
+
+    stats["last_error"] = result.get(
+        "error",
+        "",
+    )
+
+    if result.get("ok"):
+        stats["ok"] += 1
+    else:
+        stats["errors"] += 1
+
+    elapsed = result.get("elapsed")
+
+    if elapsed is not None:
+        stats["last_ms"] = round(
+            elapsed * 1000,
+            1,
+        )
 
 
 # ============================================================
 # ESPN
 # ============================================================
 
-def buscar_espn_league(nome_league, league_code):
-    agora = time.time()
+def normalize_espn(item):
 
-    # Circuit breaker para 403.
-    if agora < st.session_state.espn_block_until:
-        return {
-            "source": "ESPN",
-            "league": nome_league,
-            "events": [],
-            "status": "PAUSADA_APOS_403",
-            "duracao": 0,
-            "recebido": time.perf_counter(),
-        }
-
-    url = (
-        f"{ESPN_BASE}/"
-        f"{league_code}/scoreboard"
+    competitions = (
+        item.get("competitions")
+        or []
     )
 
-    inicio = time.perf_counter()
+    competition = (
+        competitions[0]
+        if competitions
+        else {}
+    )
 
-    try:
-        # Não utilizar User-Agent de navegador.
-        resposta = requests.get(
-            url,
-            headers={
-                "Accept": "application/json",
-                "Accept-Encoding": "gzip, deflate",
-                "Connection": "keep-alive",
-            },
-            timeout=TIMEOUT
+    competitors = (
+        competition.get("competitors")
+        or []
+    )
+
+    home = {}
+    away = {}
+
+    for competitor in competitors:
+
+        if competitor.get("homeAway") == "home":
+            home = competitor
+
+        elif competitor.get("homeAway") == "away":
+            away = competitor
+
+    return event(
+
+        "ESPN",
+
+        item.get("id"),
+
+        path(
+            home,
+            "team",
+            "displayName",
+        ),
+
+        path(
+            away,
+            "team",
+            "displayName",
+        ),
+
+        first(
+            home,
+            ["score"],
+            0,
+        ),
+
+        first(
+            away,
+            ["score"],
+            0,
+        ),
+
+        status=path(
+            competition,
+            "status",
+            "type",
+            "name",
+        ),
+
+        minute=(
+            path(
+                competition,
+                "status",
+                "displayClock",
+            )
+            or
+            path(
+                competition,
+                "status",
+                "type",
+                "shortDetail",
+            )
+        ),
+
+        kickoff=item.get(
+            "date",
+            "",
+        ),
+
+        league=path(
+            item,
+            "league",
+            "name",
+        ),
+
+        raw=item,
+    )
+
+
+def fetch_espn_league(league):
+
+    start = time.perf_counter()
+
+    if (
+        time.time()
+        < st.session_state.espn_block_until
+    ):
+
+        return source_result(
+            f"ESPN/{league}",
+            ok=False,
+            status=403,
+            error="ESPN em cooldown após HTTP 403",
+            elapsed=time.perf_counter() - start,
         )
 
-        recebido = time.perf_counter()
-        duracao = recebido - inicio
+    urls = [
 
-        if resposta.status_code == 403:
-            # Pausa por 2 minutos para não martelar
-            # a API com vários 403.
-            st.session_state.espn_block_until = (
-                time.time() + 120
+        (
+            "https://site.web.api.espn.com"
+            f"/apis/site/v2/sports/soccer/"
+            f"{league}/scoreboard"
+        ),
+
+        (
+            "https://site.api.espn.com"
+            f"/apis/site/v2/sports/soccer/"
+            f"{league}/scoreboard"
+        ),
+    ]
+
+    last_status = None
+    last_error = ""
+
+    for url in urls:
+
+        try:
+
+            response, data = get_json(
+
+                url,
+
+                headers={
+                    "Accept": "application/json",
+                    "Accept-Encoding": "gzip, deflate",
+                },
             )
 
-            return {
-                "source": "ESPN",
-                "league": nome_league,
-                "events": [],
-                "status": "403_PAUSADA_120S",
-                "duracao": duracao,
-                "recebido": recebido,
-            }
+            last_status = response.status_code
 
-        if not resposta.ok:
-            return {
-                "source": "ESPN",
-                "league": nome_league,
-                "events": [],
-                "status": f"HTTP_{resposta.status_code}",
-                "duracao": duracao,
-                "recebido": recebido,
-            }
+            if response.status_code == 403:
 
-        data = resposta.json()
+                last_error = "HTTP 403"
 
-        eventos = []
-
-        for item in data.get("events", []):
-            try:
-                comp = item.get(
-                    "competitions",
-                    [{}]
-                )[0]
-
-                competitors = comp.get(
-                    "competitors",
-                    []
-                )
-
-                home = None
-                away = None
-
-                for c in competitors:
-                    if c.get("homeAway") == "home":
-                        home = c
-                    elif c.get("homeAway") == "away":
-                        away = c
-
-                if not home or not away:
-                    continue
-
-                home_name = (
-                    home.get("team", {})
-                    .get("displayName")
-                    or home.get("team", {})
-                    .get("name")
-                )
-
-                away_name = (
-                    away.get("team", {})
-                    .get("displayName")
-                    or away.get("team", {})
-                    .get("name")
-                )
-
-                hs = home.get("score", 0)
-                aws = away.get("score", 0)
-
-                status_obj = item.get(
-                    "status",
-                    {}
-                )
-
-                status_type = (
-                    status_obj
-                    .get("type", {})
-                    .get("shortDetail")
-                    or status_obj
-                    .get("type", {})
-                    .get("name")
-                    or "LIVE"
-                )
-
-                minuto = (
-                    status_obj
-                    .get("displayClock")
-                )
-
-                ev = evento(
-                    "ESPN",
-                    home_name,
-                    away_name,
-                    hs,
-                    aws,
-                    status=status_type,
-                    minute=minuto,
-                    league=nome_league,
-                    external_id=item.get("id"),
-                    recebido=recebido,
-                    duracao=duracao
-                )
-
-                if ev and status_live(status_type):
-                    eventos.append(ev)
-
-            except Exception:
                 continue
 
-        return {
-            "source": "ESPN",
-            "league": nome_league,
-            "events": eventos,
-            "status": "OK",
-            "duracao": duracao,
-            "recebido": recebido,
-        }
+            if response.status_code == 429:
 
-    except Exception as e:
-        recebido = time.perf_counter()
+                last_error = "HTTP 429"
 
-        return {
-            "source": "ESPN",
-            "league": nome_league,
-            "events": [],
-            "status": f"ERRO: {str(e)[:80]}",
-            "duracao": recebido - inicio,
-            "recebido": recebido,
-        }
+                break
+
+            if response.status_code >= 400:
+
+                last_error = (
+                    f"HTTP {response.status_code}"
+                )
+
+                continue
+
+            raw_events = (
+                data.get("events")
+                or []
+            )
+
+            events = []
+
+            for item in raw_events:
+
+                try:
+
+                    events.append(
+                        normalize_espn(item)
+                    )
+
+                except Exception:
+
+                    continue
+
+            return source_result(
+
+                f"ESPN/{league}",
+
+                events=events,
+
+                ok=True,
+
+                status=response.status_code,
+
+                elapsed=time.perf_counter() - start,
+            )
+
+        except Exception as exc:
+
+            last_error = str(exc)
+
+    if last_status == 403:
+
+        st.session_state.espn_block_until = (
+            time.time() + ESPN_COOLDOWN
+        )
+
+    return source_result(
+
+        f"ESPN/{league}",
+
+        ok=False,
+
+        status=last_status,
+
+        error=last_error,
+
+        elapsed=time.perf_counter() - start,
+    )
 
 
-def buscar_espn():
-    resultados = []
+def fetch_espn():
 
-    # Se ESPN estiver temporariamente bloqueada,
-    # não faz várias chamadas inúteis.
-    if time.time() < st.session_state.espn_block_until:
-        return [{
-            "source": "ESPN",
-            "league": "Todas",
-            "events": [],
-            "status": "PAUSADA_APOS_403",
-            "duracao": 0,
-            "recebido": time.perf_counter(),
-        }]
+    start = time.perf_counter()
+
+    if (
+        time.time()
+        < st.session_state.espn_block_until
+    ):
+
+        return source_result(
+
+            "ESPN",
+
+            ok=False,
+
+            status=403,
+
+            error="ESPN em cooldown após HTTP 403",
+
+            elapsed=time.perf_counter() - start,
+        )
+
+    results = []
+
+    workers = min(
+        8,
+        len(ESPN_LEAGUES),
+    )
 
     with ThreadPoolExecutor(
-        max_workers=min(8, len(ESPN_LEAGUES))
+        max_workers=workers
     ) as executor:
 
         futures = {
+
             executor.submit(
-                buscar_espn_league,
-                nome,
-                codigo
-            ): nome
-            for nome, codigo in ESPN_LEAGUES.items()
+                fetch_espn_league,
+                league,
+            ): league
+
+            for league in ESPN_LEAGUES
         }
 
-        for future in as_completed(futures):
+        for future in as_completed(
+            futures
+        ):
+
             try:
-                resultados.append(
+
+                results.append(
                     future.result()
                 )
-            except Exception as e:
-                resultados.append({
-                    "source": "ESPN",
-                    "league": futures[future],
-                    "events": [],
-                    "status": f"ERRO: {e}",
-                    "duracao": 0,
-                    "recebido": time.perf_counter(),
-                })
 
-    return resultados
+            except Exception as exc:
+
+                results.append(
+                    source_result(
+                        f"ESPN/{futures[future]}",
+                        ok=False,
+                        error=str(exc),
+                    )
+                )
+
+    events = []
+
+    errors = []
+
+    any_ok = False
+
+    for result in results:
+
+        if result.get("ok"):
+            any_ok = True
+
+        events.extend(
+            result.get("events", [])
+        )
+
+        if not result.get("ok"):
+
+            if result.get("error"):
+
+                errors.append(
+                    f"{result['source']}: "
+                    f"{result['error']}"
+                )
+
+    return source_result(
+
+        "ESPN",
+
+        events=events,
+
+        ok=any_ok,
+
+        status=(
+            200
+            if any_ok
+            else 403
+            if any(
+                x.get("status") == 403
+                for x in results
+            )
+            else None
+        ),
+
+        error=" | ".join(
+            errors[:5]
+        ),
+
+        elapsed=time.perf_counter() - start,
+    )
 
 
 # ============================================================
-# FIVE DOLLAR FOOTBALL
+# 5DOLLAR
 # ============================================================
 
-def buscar_fivedollar():
-    if not FIVEDOLLAR_FOOTBALL_API_KEY:
-        return {
-            "source": "FiveDollar",
-            "events": [],
-            "status": "SEM_CHAVE",
-            "duracao": 0,
-            "recebido": time.perf_counter(),
-        }
+def normalize_5dollar(item):
 
-    url = (
-        f"{FIVEDOLLAR_BASE}/fixtures"
+    teams = item.get(
+        "teams"
+    ) or {}
+
+    home = (
+        teams.get("home")
+        or {}
     )
 
-    headers = {
-        "Authorization":
-            f"Bearer {FIVEDOLLAR_FOOTBALL_API_KEY}",
-        "Accept": "application/json",
-    }
-
-    r = http_get(
-        url,
-        headers=headers,
-        params={
-            "status": "live",
-            "per_page": 500,
-        }
+    away = (
+        teams.get("away")
+        or {}
     )
 
-    if not r["ok"]:
-        return {
-            "source": "FiveDollar",
-            "events": [],
-            "status": (
-                f"HTTP_{r['status']}"
-                if r["status"]
-                else f"ERRO_{r['erro']}"
+    goals = (
+        item.get("goals")
+        or {}
+    )
+
+    return event(
+
+        "5Dollar",
+
+        item.get("id"),
+
+        home.get("name"),
+
+        away.get("name"),
+
+        goals.get("home", 0),
+
+        goals.get("away", 0),
+
+        status=item.get(
+            "status",
+            "",
+        ),
+
+        minute=(
+            item.get("minute")
+            or item.get("status_code")
+            or ""
+        ),
+
+        kickoff=(
+            item.get(
+                "kickoff_utc",
+                "",
+            )
+        ),
+
+        league=path(
+            item,
+            "league",
+            "name",
+        ),
+
+        raw=item,
+    )
+
+
+def fetch_5dollar():
+
+    start = time.perf_counter()
+
+    if not FIVEDOLLAR_KEY:
+
+        return source_result(
+
+            "5Dollar",
+
+            ok=False,
+
+            error=(
+                "FIVEDOLLAR_FOOTBALL_API_KEY "
+                "não configurada"
             ),
-            "duracao": r["duracao"],
-            "recebido": r["recebido"],
-        }
 
-    data = r["json"]
+            elapsed=time.perf_counter() - start,
+        )
 
-    rows = data.get("data", [])
+    try:
 
-    eventos = []
+        response, data = get_json(
 
-    for item in rows:
-        try:
-            teams = item.get(
-                "teams",
-                {}
+            "https://api.5dollarfootballapi.com/v1/fixtures",
+
+            headers={
+                "Authorization":
+                    f"Bearer {FIVEDOLLAR_KEY}",
+                "Accept":
+                    "application/json",
+            },
+
+            params={
+                "status": "live",
+            },
+        )
+
+        if response.status_code >= 400:
+
+            return source_result(
+
+                "5Dollar",
+
+                ok=False,
+
+                status=response.status_code,
+
+                error=str(data)[:500],
+
+                elapsed=time.perf_counter() - start,
             )
 
-            home = (
-                teams.get("home", {})
-                .get("name")
-            )
+        raw = []
 
-            away = (
-                teams.get("away", {})
-                .get("name")
-            )
+        if isinstance(data, list):
+            raw = data
 
-            goals = item.get(
-                "goals",
-                {}
-            )
+        elif isinstance(data, dict):
 
-            hs = goals.get("home")
-            aws = goals.get("away")
+            for key in (
+                "data",
+                "fixtures",
+                "matches",
+                "results",
+            ):
 
-            ev = evento(
-                "FiveDollar",
-                home,
-                away,
-                hs,
-                aws,
-                status=item.get("status"),
-                league=(
-                    item.get("league", {})
-                    .get("name")
-                ),
-                external_id=item.get("id"),
-                recebido=r["recebido"],
-                duracao=r["duracao"]
-            )
+                if isinstance(
+                    data.get(key),
+                    list,
+                ):
 
-            if ev:
-                eventos.append(ev)
+                    raw = data[key]
 
-        except Exception:
-            continue
+                    break
 
-    return {
-        "source": "FiveDollar",
-        "events": eventos,
-        "status": "OK",
-        "duracao": r["duracao"],
-        "recebido": r["recebido"],
-    }
+        events = []
+
+        for item in raw:
+
+            try:
+
+                events.append(
+                    normalize_5dollar(item)
+                )
+
+            except Exception:
+
+                continue
+
+        return source_result(
+
+            "5Dollar",
+
+            events=events,
+
+            ok=True,
+
+            status=response.status_code,
+
+            elapsed=time.perf_counter() - start,
+        )
+
+    except Exception as exc:
+
+        return source_result(
+
+            "5Dollar",
+
+            ok=False,
+
+            error=str(exc),
+
+            elapsed=time.perf_counter() - start,
+        )
 
 
 # ============================================================
 # OPENFOOT
 # ============================================================
 
-def buscar_openfoot():
-    if not OPENFOOT_API_KEY:
-        return {
-            "source": "OpenFoot",
-            "events": [],
-            "status": "SEM_CHAVE",
-            "duracao": 0,
-            "recebido": time.perf_counter(),
-        }
+def normalize_openfoot(item):
 
-    url = (
-        f"{OPENFOOT_BASE}/matches"
+    home = (
+        item.get("homeTeam")
+        or {}
     )
+
+    away = (
+        item.get("awayTeam")
+        or {}
+    )
+
+    score = (
+        item.get("score")
+        or item.get("goals")
+        or {}
+    )
+
+    hs, aws = parse_score(
+        score
+    )
+
+    return event(
+
+        "OpenFoot",
+
+        item.get("id"),
+
+        home.get("name")
+        or item.get("home"),
+
+        away.get("name")
+        or item.get("away"),
+
+        hs,
+
+        aws,
+
+        status=item.get(
+            "status",
+            "",
+        ),
+
+        minute=(
+            item.get("minute")
+            or item.get("elapsed")
+            or ""
+        ),
+
+        kickoff=(
+            item.get("kickoffAt")
+            or item.get("kickoff")
+            or ""
+        ),
+
+        league=path(
+            item,
+            "competition",
+            "name",
+        ),
+
+        raw=item,
+    )
+
+
+def fetch_openfoot():
+
+    start = time.perf_counter()
 
     headers = {
-        "Authorization":
-            f"Bearer {OPENFOOT_API_KEY}",
-        "Accept": "application/json",
+        "Accept":
+            "application/json",
     }
 
-    r = http_get(
-        url,
-        headers=headers,
-        params={
-            "status": "live",
-        }
-    )
+    if OPENFOOT_KEY:
 
-    if not r["ok"]:
-        return {
-            "source": "OpenFoot",
-            "events": [],
-            "status": (
-                f"HTTP_{r['status']}"
-                if r["status"]
-                else f"ERRO_{r['erro']}"
-            ),
-            "duracao": r["duracao"],
-            "recebido": r["recebido"],
-        }
+        headers[
+            "Authorization"
+        ] = (
+            f"Bearer {OPENFOOT_KEY}"
+        )
 
-    data = r["json"]
+    try:
 
-    rows = data.get("data", [])
-
-    eventos = []
-
-    for item in rows:
-        try:
-            home = (
-                item.get("homeTeam", {})
-                .get("name")
+        date_str = (
+            datetime.now(
+                timezone.utc
+            ).strftime(
+                "%Y-%m-%d"
             )
+        )
 
-            away = (
-                item.get("awayTeam", {})
-                .get("name")
-            )
+        response, data = get_json(
 
-            # O contrato do OpenFoot pode apresentar
-            # placares em diferentes objetos conforme o
-            # endpoint/plano.
-            score = (
-                item.get("score")
-                or item.get("scores")
-                or {}
-            )
+            "https://openfootapi.com/v1/matches",
 
-            hs = (
-                score.get("home")
-                if isinstance(score, dict)
-                else None
-            )
+            headers=headers,
 
-            aws = (
-                score.get("away")
-                if isinstance(score, dict)
-                else None
-            )
+            params={
+                "date": date_str,
+            },
+        )
 
-            if hs is None:
-                hs = (
-                    item.get("homeScore")
-                    or item.get("homeGoals")
-                )
+        if response.status_code >= 400:
 
-            if aws is None:
-                aws = (
-                    item.get("awayScore")
-                    or item.get("awayGoals")
-                )
+            return source_result(
 
-            ev = evento(
                 "OpenFoot",
-                home,
-                away,
-                hs,
-                aws,
-                status=item.get("status"),
-                minute=item.get("minute"),
-                league=(
-                    item.get("competition", {})
-                    .get("name")
-                    if isinstance(
-                        item.get("competition"),
-                        dict
-                    )
-                    else ""
-                ),
-                external_id=item.get("id"),
-                recebido=r["recebido"],
-                duracao=r["duracao"]
+
+                ok=False,
+
+                status=response.status_code,
+
+                error=str(data)[:500],
+
+                elapsed=time.perf_counter() - start,
             )
 
-            if ev:
-                eventos.append(ev)
+        raw = []
 
-        except Exception:
-            continue
+        if isinstance(data, list):
 
-    return {
-        "source": "OpenFoot",
-        "events": eventos,
-        "status": "OK",
-        "duracao": r["duracao"],
-        "recebido": r["recebido"],
-    }
+            raw = data
+
+        elif isinstance(data, dict):
+
+            for key in (
+                "data",
+                "matches",
+                "fixtures",
+                "events",
+                "results",
+            ):
+
+                if isinstance(
+                    data.get(key),
+                    list,
+                ):
+
+                    raw = data[key]
+
+                    break
+
+        events = []
+
+        for item in raw:
+
+            try:
+
+                events.append(
+                    normalize_openfoot(item)
+                )
+
+            except Exception:
+
+                continue
+
+        return source_result(
+
+            "OpenFoot",
+
+            events=events,
+
+            ok=True,
+
+            status=response.status_code,
+
+            elapsed=time.perf_counter() - start,
+        )
+
+    except Exception as exc:
+
+        return source_result(
+
+            "OpenFoot",
+
+            ok=False,
+
+            error=str(exc),
+
+            elapsed=time.perf_counter() - start,
+        )
 
 
 # ============================================================
 # FOOTBALL-DATA.ORG
 # ============================================================
 
-def buscar_football_data():
-    if not FOOTBALL_DATA_API_TOKEN:
-        return {
-            "source": "FootballData",
-            "events": [],
-            "status": "SEM_TOKEN",
-            "duracao": 0,
-            "recebido": time.perf_counter(),
-        }
+def normalize_football_data(item):
 
-    url = (
-        f"{FOOTBALL_DATA_BASE}/matches"
+    score = (
+        item.get("score")
+        or {}
     )
 
-    headers = {
-        "X-Auth-Token":
-            FOOTBALL_DATA_API_TOKEN,
-        "Accept": "application/json",
-    }
-
-    r = http_get(
-        url,
-        headers=headers,
-        params={
-            "status": "IN_PLAY"
-        }
+    full_time = (
+        score.get("fullTime")
+        or {}
     )
 
-    if not r["ok"]:
-        return {
-            "source": "FootballData",
-            "events": [],
-            "status": (
-                f"HTTP_{r['status']}"
-                if r["status"]
-                else f"ERRO_{r['erro']}"
+    home_score = full_time.get(
+        "home",
+        0,
+    )
+
+    away_score = full_time.get(
+        "away",
+        0,
+    )
+
+    return event(
+
+        "FootballData",
+
+        item.get("id"),
+
+        path(
+            item,
+            "homeTeam",
+            "name",
+        ),
+
+        path(
+            item,
+            "awayTeam",
+            "name",
+        ),
+
+        home_score,
+
+        away_score,
+
+        status=item.get(
+            "status",
+            "",
+        ),
+
+        kickoff=item.get(
+            "utcDate",
+            "",
+        ),
+
+        league=path(
+            item,
+            "competition",
+            "name",
+        ),
+
+        country=path(
+            item,
+            "area",
+            "name",
+        ),
+
+        raw=item,
+    )
+
+
+def fetch_football_data():
+
+    start = time.perf_counter()
+
+    if not FOOTBALL_DATA_TOKEN:
+
+        return source_result(
+
+            "FootballData",
+
+            ok=False,
+
+            error=(
+                "FOOTBALL_DATA_API_TOKEN "
+                "não configurada"
             ),
-            "duracao": r["duracao"],
-            "recebido": r["recebido"],
-        }
 
-    data = r["json"]
+            elapsed=time.perf_counter() - start,
+        )
 
-    rows = data.get(
-        "matches",
-        []
-    )
+    try:
 
-    eventos = []
+        response, data = get_json(
 
-    for item in rows:
-        try:
-            home = (
-                item.get("homeTeam", {})
-                .get("name")
-            )
+            "https://api.football-data.org/v4/matches",
 
-            away = (
-                item.get("awayTeam", {})
-                .get("name")
-            )
+            headers={
+                "X-Auth-Token":
+                    FOOTBALL_DATA_TOKEN,
+                "Accept":
+                    "application/json",
+            },
 
-            score = item.get(
-                "score",
-                {}
-            )
+            params={
+                "status": "IN_PLAY",
+            },
+        )
 
-            full = score.get(
-                "fullTime",
-                {}
-            )
+        if response.status_code >= 400:
 
-            hs = full.get("home")
-            aws = full.get("away")
+            return source_result(
 
-            # Algumas respostas podem fornecer
-            # halfTime enquanto fullTime ainda não
-            # estiver atualizado.
-            if hs is None:
-                hs = score.get("halfTime", {}).get("home")
-
-            if aws is None:
-                aws = score.get("halfTime", {}).get("away")
-
-            ev = evento(
                 "FootballData",
-                home,
-                away,
-                hs,
-                aws,
-                status=item.get("status"),
-                minute=item.get("minute"),
-                league=(
-                    item.get("competition", {})
-                    .get("name")
-                ),
-                external_id=item.get("id"),
-                recebido=r["recebido"],
-                duracao=r["duracao"]
+
+                ok=False,
+
+                status=response.status_code,
+
+                error=str(data)[:500],
+
+                elapsed=time.perf_counter() - start,
             )
 
-            if ev:
-                eventos.append(ev)
+        raw = (
+            data.get("matches")
+            or []
+        )
 
-        except Exception:
-            continue
+        events = []
 
-    return {
-        "source": "FootballData",
-        "events": eventos,
-        "status": "OK",
-        "duracao": r["duracao"],
-        "recebido": r["recebido"],
-    }
+        for item in raw:
+
+            try:
+
+                events.append(
+                    normalize_football_data(
+                        item
+                    )
+                )
+
+            except Exception:
+
+                continue
+
+        return source_result(
+
+            "FootballData",
+
+            events=events,
+
+            ok=True,
+
+            status=response.status_code,
+
+            elapsed=time.perf_counter() - start,
+        )
+
+    except Exception as exc:
+
+        return source_result(
+
+            "FootballData",
+
+            ok=False,
+
+            error=str(exc),
+
+            elapsed=time.perf_counter() - start,
+        )
 
 
 # ============================================================
-# THESPORTSDB
+# API-FOOTBALL
 # ============================================================
 
-def buscar_thesportsdb():
-    if not THESPORTSDB_API_KEY:
-        return {
-            "source": "TheSportsDB",
-            "events": [],
-            "status": "SEM_CHAVE",
-            "duracao": 0,
-            "recebido": time.perf_counter(),
-        }
+def normalize_api_football(item):
 
-    url = (
-        f"{THESPORTSDB_BASE}/"
-        f"livescore/soccer"
+    fixture = (
+        item.get("fixture")
+        or {}
     )
 
-    headers = {
-        "X-API-KEY":
-            THESPORTSDB_API_KEY,
-        "Accept": "application/json",
-    }
-
-    r = http_get(
-        url,
-        headers=headers
+    teams = (
+        item.get("teams")
+        or {}
     )
 
-    if not r["ok"]:
-        return {
-            "source": "TheSportsDB",
-            "events": [],
-            "status": (
-                f"HTTP_{r['status']}"
-                if r["status"]
-                else f"ERRO_{r['erro']}"
+    goals = (
+        item.get("goals")
+        or {}
+    )
+
+    return event(
+
+        "APIFootball",
+
+        fixture.get("id"),
+
+        path(
+            teams,
+            "home",
+            "name",
+        ),
+
+        path(
+            teams,
+            "away",
+            "name",
+        ),
+
+        goals.get(
+            "home",
+            0,
+        ),
+
+        goals.get(
+            "away",
+            0,
+        ),
+
+        status=path(
+            fixture,
+            "status",
+            "short",
+        ),
+
+        minute=path(
+            fixture,
+            "status",
+            "elapsed",
+        ),
+
+        kickoff=fixture.get(
+            "date",
+            "",
+        ),
+
+        league=path(
+            item,
+            "league",
+            "name",
+        ),
+
+        country=path(
+            item,
+            "league",
+            "country",
+        ),
+
+        raw=item,
+    )
+
+
+def fetch_api_football():
+
+    start = time.perf_counter()
+
+    if not API_FOOTBALL_KEY:
+
+        return source_result(
+
+            "APIFootball",
+
+            ok=False,
+
+            error=(
+                "API_FOOTBALL_KEY "
+                "não configurada"
             ),
-            "duracao": r["duracao"],
-            "recebido": r["recebido"],
-        }
 
-    data = r["json"]
+            elapsed=time.perf_counter() - start,
+        )
 
-    # Diferentes versões podem devolver
-    # livescore ou livescores.
-    rows = (
-        data.get("livescore")
-        or data.get("livescores")
-        or data.get("data")
-        or []
+    try:
+
+        response, data = get_json(
+
+            "https://v3.football.api-sports.io/fixtures",
+
+            headers={
+                "x-apisports-key":
+                    API_FOOTBALL_KEY,
+                "Accept":
+                    "application/json",
+            },
+
+            params={
+                "live": "all",
+            },
+        )
+
+        if response.status_code >= 400:
+
+            return source_result(
+
+                "APIFootball",
+
+                ok=False,
+
+                status=response.status_code,
+
+                error=str(data)[:500],
+
+                elapsed=time.perf_counter() - start,
+            )
+
+        raw = (
+            data.get("response")
+            or []
+        )
+
+        events = []
+
+        for item in raw:
+
+            try:
+
+                events.append(
+                    normalize_api_football(
+                        item
+                    )
+                )
+
+            except Exception:
+
+                continue
+
+        return source_result(
+
+            "APIFootball",
+
+            events=events,
+
+            ok=True,
+
+            status=response.status_code,
+
+            elapsed=time.perf_counter() - start,
+        )
+
+    except Exception as exc:
+
+        return source_result(
+
+            "APIFootball",
+
+            ok=False,
+
+            error=str(exc),
+
+            elapsed=time.perf_counter() - start,
+        )
+
+
+# ============================================================
+# THE SPORTS DB
+# ============================================================
+
+def normalize_tsdb(item):
+
+    return event(
+
+        "TheSportsDB",
+
+        item.get(
+            "idEvent"
+        ),
+
+        item.get(
+            "strHomeTeam"
+        ),
+
+        item.get(
+            "strAwayTeam"
+        ),
+
+        item.get(
+            "intHomeScore",
+            0,
+        ),
+
+        item.get(
+            "intAwayScore",
+            0,
+        ),
+
+        status=item.get(
+            "strStatus",
+            "",
+        ),
+
+        minute=item.get(
+            "strProgress",
+            "",
+        ),
+
+        kickoff=(
+            item.get(
+                "strEventTime"
+            )
+            or item.get(
+                "dateEvent"
+            )
+            or ""
+        ),
+
+        league=item.get(
+            "strLeague",
+            "",
+        ),
+
+        raw=item,
     )
 
-    if isinstance(rows, dict):
-        rows = [rows]
 
-    eventos = []
+def fetch_tsdb():
 
-    for item in rows:
-        try:
-            home = (
-                item.get("strHomeTeam")
-                or item.get("homeTeam")
-                or item.get("home")
-            )
+    start = time.perf_counter()
 
-            away = (
-                item.get("strAwayTeam")
-                or item.get("awayTeam")
-                or item.get("away")
-            )
+    if not THESPORTSDB_KEY:
 
-            hs = (
-                item.get("intHomeScore")
-                or item.get("homeScore")
-            )
+        return source_result(
 
-            aws = (
-                item.get("intAwayScore")
-                or item.get("awayScore")
-            )
+            "TheSportsDB",
 
-            ev = evento(
+            ok=False,
+
+            error=(
+                "THESPORTSDB_API_KEY "
+                "não configurada"
+            ),
+
+            elapsed=time.perf_counter() - start,
+        )
+
+    try:
+
+        response, data = get_json(
+
+            "https://www.thesportsdb.com/api/v2/json/livescore/soccer",
+
+            headers={
+                "X-API-KEY":
+                    THESPORTSDB_KEY,
+                "Accept":
+                    "application/json",
+            },
+        )
+
+        if response.status_code >= 400:
+
+            return source_result(
+
                 "TheSportsDB",
-                home,
-                away,
-                hs,
-                aws,
-                status=item.get("strStatus"),
-                minute=item.get("strProgress"),
-                league=(
-                    item.get("strLeague")
-                    or item.get("league")
-                    or ""
-                ),
-                external_id=(
-                    item.get("idEvent")
-                    or item.get("eventId")
-                ),
-                recebido=r["recebido"],
-                duracao=r["duracao"]
+
+                ok=False,
+
+                status=response.status_code,
+
+                error=str(data)[:500],
+
+                elapsed=time.perf_counter() - start,
             )
 
-            if ev:
-                eventos.append(ev)
+        raw = []
 
-        except Exception:
-            continue
+        if isinstance(data, list):
 
-    return {
-        "source": "TheSportsDB",
-        "events": eventos,
-        "status": "OK",
-        "duracao": r["duracao"],
-        "recebido": r["recebido"],
-    }
+            raw = data
+
+        elif isinstance(data, dict):
+
+            for key in (
+                "data",
+                "events",
+                "livescore",
+                "results",
+            ):
+
+                if isinstance(
+                    data.get(key),
+                    list,
+                ):
+
+                    raw = data[key]
+
+                    break
+
+        events = []
+
+        for item in raw:
+
+            try:
+
+                events.append(
+                    normalize_tsdb(item)
+                )
+
+            except Exception:
+
+                continue
+
+        return source_result(
+
+            "TheSportsDB",
+
+            events=events,
+
+            ok=True,
+
+            status=response.status_code,
+
+            elapsed=time.perf_counter() - start,
+        )
+
+    except Exception as exc:
+
+        return source_result(
+
+            "TheSportsDB",
+
+            ok=False,
+
+            error=str(exc),
+
+            elapsed=time.perf_counter() - start,
+        )
+
+
+# ============================================================
+# FONTES
+# ============================================================
+
+SOURCE_FUNCTIONS = [
+
+    (
+        "ESPN",
+        fetch_espn,
+    ),
+
+    (
+        "5Dollar",
+        fetch_5dollar,
+    ),
+
+    (
+        "OpenFoot",
+        fetch_openfoot,
+    ),
+
+    (
+        "FootballData",
+        fetch_football_data,
+    ),
+
+    (
+        "APIFootball",
+        fetch_api_football,
+    ),
+
+    (
+        "TheSportsDB",
+        fetch_tsdb,
+    ),
+]
+
+
+# ============================================================
+# DETECÇÃO DE GOL
+# ============================================================
+
+def detect_goals(events):
+
+    detected = []
+
+    for ev in events:
+
+        cache_key = ev["id"]
+
+        previous = (
+            st.session_state
+            .score_cache
+            .get(cache_key)
+        )
+
+        current_home = ev[
+            "home_score"
+        ]
+
+        current_away = ev[
+            "away_score"
+        ]
+
+        if previous:
+
+            old_home = previous[
+                "home_score"
+            ]
+
+            old_away = previous[
+                "away_score"
+            ]
+
+            changed = (
+                current_home != old_home
+                or
+                current_away != old_away
+            )
+
+            if changed:
+
+                goals_added = (
+                    current_home
+                    - old_home
+                    +
+                    current_away
+                    - old_away
+                )
+
+                if goals_added > 0:
+
+                    detected.append({
+
+                        "event": ev,
+
+                        "old_score":
+                            previous["score"],
+
+                        "new_score":
+                            ev["score"],
+
+                        "detected_at":
+                            ev["received_at"],
+                    })
+
+        st.session_state.score_cache[
+            cache_key
+        ] = ev
+
+    return detected
+
+
+# ============================================================
+# RANKING DE CHEGADA
+# ============================================================
+
+def ranking_sources(events):
+
+    if not events:
+        return []
+
+    return sorted(
+        events,
+        key=lambda x:
+            x["received_at"],
+    )
 
 
 # ============================================================
 # OPENROUTER
 # ============================================================
 
-def analisar_gol_openrouter(
-    jogo,
-    placar_anterior,
-    placar_novo,
-    fonte
-):
-    if not OPENROUTER_API_KEY:
-        return "OpenRouter desativado: chave não configurada."
+def openrouter_prompt(goal):
 
-    url = (
-        "https://openrouter.ai/api/v1/chat/completions"
+    ev = goal["event"]
+
+    return f"""
+Analise objetivamente o impacto deste gol.
+
+Jogo:
+{ev['home']} x {ev['away']}
+
+Placar anterior:
+{goal['old_score']}
+
+Novo placar:
+{goal['new_score']}
+
+Minuto:
+{ev.get('minute') or ev.get('status') or 'não informado'}
+
+Liga:
+{ev.get('league') or 'não informada'}
+
+Fonte:
+{ev['source']}
+
+Não invente estatísticas.
+
+Responda em português com:
+
+1. Impacto do gol
+2. Cenário do jogo
+3. Mercados que merecem observação
+4. Principais riscos
+
+Não trate a análise como garantia de resultado.
+""".strip()
+
+
+def analyze_goal(goal):
+
+    if not OPENROUTER_API_KEY:
+
+        return (
+            "OpenRouter não configurado."
+        )
+
+    ev = goal["event"]
+
+    cache_key = (
+        ev["id"],
+        goal["new_score"],
     )
 
-    headers = {
-        "Authorization":
-            f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer":
-            "https://football-scanner.streamlit.app",
-        "X-Title":
-            "Football Goal Race",
-    }
+    if (
+        cache_key
+        in st.session_state.analysis_cache
+    ):
 
-    prompt = f"""
-Você é um analista de futebol.
-
-Foi detectada uma mudança de placar ao vivo.
-
-Jogo: {jogo}
-Placar anterior: {placar_anterior}
-Novo placar: {placar_novo}
-Primeira fonte que reportou: {fonte}
-
-Faça uma análise MUITO curta, sem inventar estatísticas.
-
-Responda exatamente em 3 linhas:
-
-EVENTO: descreva a mudança do placar.
-LEITURA: explique somente o que pode ser concluído do placar.
-ATENÇÃO: diga que um placar confirmado por uma API não garante atraso ou vantagem de aposta.
-"""
+        return st.session_state.analysis_cache[
+            cache_key
+        ]
 
     payload = {
-        "model": OPENROUTER_MODEL,
+
+        "model":
+            OPENROUTER_MODEL,
+
         "messages": [
+
             {
-                "role": "user",
-                "content": prompt
-            }
+                "role":
+                    "system",
+
+                "content":
+                    (
+                        "Você é um analista "
+                        "estatístico de futebol."
+                    ),
+            },
+
+            {
+                "role":
+                    "user",
+
+                "content":
+                    openrouter_prompt(goal),
+            },
         ],
-        "temperature": 0.1,
-        "max_tokens": 180,
+
+        "temperature":
+            0.2,
+
+        "max_tokens":
+            400,
     }
 
     try:
-        r = requests.post(
-            url,
-            headers=headers,
+
+        response = requests.post(
+
+            "https://openrouter.ai/api/v1/chat/completions",
+
+            headers={
+
+                "Authorization":
+                    f"Bearer {OPENROUTER_API_KEY}",
+
+                "Content-Type":
+                    "application/json",
+
+                "HTTP-Referer":
+                    "https://streamlit.io",
+
+                "X-Title":
+                    "Football Scanner",
+            },
+
             json=payload,
-            timeout=15
+
+            timeout=OPENROUTER_TIMEOUT,
         )
 
-        if not r.ok:
+        try:
+
+            data = response.json()
+
+        except Exception:
+
+            data = {}
+
+        if response.status_code >= 400:
+
             return (
-                f"OpenRouter HTTP {r.status_code}: "
-                f"{r.text[:150]}"
+                f"OpenRouter HTTP "
+                f"{response.status_code}: "
+                f"{str(data)[:300]}"
             )
 
-        data = r.json()
-
-        return (
-            data.get("choices", [{}])[0]
-            .get("message", {})
-            .get("content", "")
-            .strip()
+        choices = (
+            data.get("choices")
+            or []
         )
 
-    except Exception as e:
-        return f"Erro OpenRouter: {e}"
+        if not choices:
+
+            return (
+                "OpenRouter não retornou "
+                "uma resposta."
+            )
+
+        message = (
+            choices[0]
+            .get("message")
+            or {}
+        )
+
+        answer = (
+            message.get("content")
+            or "Resposta vazia."
+        )
+
+        st.session_state.analysis_cache[
+            cache_key
+        ] = answer
+
+        return answer
+
+    except Exception as exc:
+
+        return (
+            f"Erro OpenRouter: {exc}"
+        )
 
 
 # ============================================================
 # TELEGRAM
 # ============================================================
 
-def enviar_telegram(mensagem):
+def telegram_send(message):
+
     if not TELEGRAM_BOT_TOKEN:
-        return False, "BOT_TOKEN não configurado"
 
-    if not TELEGRAM_CHAT_ID:
-        return False, "CHAT_ID não configurado"
-
-    url = (
-        f"https://api.telegram.org/"
-        f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    )
-
-    try:
-        r = requests.post(
-            url,
-            data={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": mensagem,
-            },
-            timeout=10
+        return False, (
+            "TELEGRAM_BOT_TOKEN "
+            "não configurado."
         )
 
-        if r.ok:
-            return True, "OK"
+    if not TELEGRAM_CHAT_ID:
 
-        return False, f"HTTP {r.status_code}"
+        return False, (
+            "TELEGRAM_CHAT_ID "
+            "não configurado."
+        )
 
-    except Exception as e:
-        return False, str(e)
+    try:
+
+        response = requests.post(
+
+            (
+                "https://api.telegram.org/"
+                f"bot{TELEGRAM_BOT_TOKEN}/"
+                "sendMessage"
+            ),
+
+            json={
+
+                "chat_id":
+                    TELEGRAM_CHAT_ID,
+
+                "text":
+                    message,
+
+            },
+
+            timeout=10,
+        )
+
+        if response.status_code >= 400:
+
+            return (
+                False,
+                response.text[:300],
+            )
+
+        return True, "OK"
+
+    except Exception as exc:
+
+        return False, str(exc)
+
+
+def notify_goal(goal, ai_text=""):
+
+    ev = goal["event"]
+
+    message = (
+        "⚽ GOL DETECTADO\n\n"
+        f"{ev['home']} "
+        f"{goal['new_score']} "
+        f"{ev['away']}\n\n"
+        f"Fonte: {ev['source']}\n"
+        f"Minuto: "
+        f"{ev.get('minute') or ev.get('status') or '-'}"
+    )
+
+    if ai_text:
+
+        message += (
+            "\n\n🤖 IA:\n"
+            + ai_text[:2500]
+        )
+
+    return telegram_send(
+        message
+    )
 
 
 # ============================================================
-# TODAS AS FONTES EM PARALELO
+# CICLO
 # ============================================================
 
-def consultar_fontes():
-    fontes = [
-        ("ESPN", buscar_espn),
-        ("FiveDollar", buscar_fivedollar),
-        ("OpenFoot", buscar_openfoot),
-        ("FootballData", buscar_football_data),
-        ("TheSportsDB", buscar_thesportsdb),
-    ]
+def run_cycle():
 
-    resultados = []
+    cycle_start = time.perf_counter()
 
-    inicio_ciclo = time.perf_counter()
+    results = []
 
+    # TODAS AS FONTES SIMULTÂNEAS
     with ThreadPoolExecutor(
-        max_workers=5
+        max_workers=SOURCE_WORKERS
     ) as executor:
 
         futures = {
-            executor.submit(func): nome
-            for nome, func in fontes
+
+            executor.submit(
+                function
+            ):
+                name
+
+            for name, function
+            in SOURCE_FUNCTIONS
         }
 
-        for future in as_completed(futures):
-            nome = futures[future]
+        for future in as_completed(
+            futures
+        ):
+
+            name = futures[
+                future
+            ]
 
             try:
-                resultado = future.result()
 
-            except Exception as e:
-                resultado = {
-                    "source": nome,
-                    "events": [],
-                    "status": f"ERRO: {e}",
-                    "duracao": 0,
-                    "recebido": time.perf_counter(),
-                }
-
-            resultados.append(resultado)
-
-    fim_ciclo = time.perf_counter()
-
-    # Ordena pela hora REAL de recebimento.
-    resultados.sort(
-        key=lambda x: x.get(
-            "recebido",
-            float("inf")
-        )
-    )
-
-    return resultados, (
-        fim_ciclo - inicio_ciclo
-    )
-
-
-# ============================================================
-# INDEXAÇÃO
-# ============================================================
-
-def indexar_resultados(resultados):
-    jogos = {}
-
-    for resultado in resultados:
-
-        source = resultado.get(
-            "source",
-            ""
-        )
-
-        recebido = resultado.get(
-            "recebido",
-            time.perf_counter()
-        )
-
-        duracao = resultado.get(
-            "duracao",
-            0
-        )
-
-        for ev in resultado.get(
-            "events",
-            []
-        ):
-
-            home = ev.get("home")
-            away = ev.get("away")
-
-            if not home or not away:
-                continue
-
-            chave = chave_jogo(
-                home,
-                away
-            )
-
-            ev["received_at"] = recebido
-            ev["duration"] = duracao
-
-            if chave not in jogos:
-                jogos[chave] = []
-
-            jogos[chave].append(ev)
-
-    return jogos
-
-
-# ============================================================
-# DETECÇÃO DE GOLS
-# ============================================================
-
-def detectar_gols(jogos):
-    novos_gols = []
-
-    # Cada jogo é analisado separadamente.
-    for chave, eventos in jogos.items():
-
-        if not eventos:
-            continue
-
-        # Ordem REAL em que as respostas chegaram.
-        eventos_ordenados = sorted(
-            eventos,
-            key=lambda x: x.get(
-                "received_at",
-                float("inf")
-            )
-        )
-
-        # Último placar conhecido pelo conjunto das fontes.
-        placares = []
-
-        for ev in eventos_ordenados:
-            placares.append(
-                (
-                    ev["home_score"],
-                    ev["away_score"]
+                result = (
+                    future.result()
                 )
+
+            except Exception as exc:
+
+                result = source_result(
+
+                    name,
+
+                    ok=False,
+
+                    error=str(exc),
+                )
+
+            register_source(
+                result
             )
 
-        if not placares:
-            continue
-
-        melhor_score = max(
-            placares,
-            key=lambda x: sum(x)
-        )
-
-        home = eventos_ordenados[0]["home"]
-        away = eventos_ordenados[0]["away"]
-
-        nome = nome_jogo(
-            home,
-            away
-        )
-
-        estado_anterior = st.session_state.score_state.get(
-            chave
-        )
-
-        # Primeiro ciclo:
-        # apenas cria baseline.
-        if estado_anterior is None:
-
-            st.session_state.score_state[
-                chave
-            ] = melhor_score
-
-            continue
-
-        # Não houve mudança.
-        if (
-            melhor_score[0] <= estado_anterior[0]
-            and
-            melhor_score[1] <= estado_anterior[1]
-        ):
-            continue
-
-        # Encontrar a PRIMEIRA fonte que já
-        # havia recebido o novo placar.
-        fonte_primeira = None
-        evento_primeiro = None
-
-        for ev in eventos_ordenados:
-
-            score_ev = (
-                ev["home_score"],
-                ev["away_score"]
+            results.append(
+                result
             )
 
-            if (
-                score_ev[0] >= melhor_score[0]
-                and
-                score_ev[1] >= melhor_score[1]
-            ):
-                fonte_primeira = ev["source"]
-                evento_primeiro = ev
-                break
+    events = []
 
-        if not fonte_primeira:
-            fonte_primeira = eventos_ordenados[0]["source"]
-            evento_primeiro = eventos_ordenados[0]
+    for result in results:
 
-        # Timestamp de chegada da primeira fonte.
-        primeiro_recebimento = (
-            evento_primeiro.get(
-                "received_at"
+        events.extend(
+            result.get(
+                "events",
+                [],
             )
         )
 
-        # Ranking das fontes para esse jogo.
-        ranking = []
-
-        for ev in eventos_ordenados:
-
-            score_ev = (
-                ev["home_score"],
-                ev["away_score"]
-            )
-
-            if (
-                score_ev[0] >= melhor_score[0]
-                and
-                score_ev[1] >= melhor_score[1]
-            ):
-                ranking.append({
-                    "source": ev["source"],
-                    "received_at": ev.get(
-                        "received_at"
-                    ),
-                    "duration": ev.get(
-                        "duration",
-                        0
-                    ),
-                    "score": score_ev,
-                })
-
-        # Atualiza baseline.
-        st.session_state.score_state[
-            chave
-        ] = melhor_score
-
-        novos_gols.append({
-            "jogo": nome,
-            "home": home,
-            "away": away,
-            "anterior": estado_anterior,
-            "novo": melhor_score,
-            "fonte_primeira": fonte_primeira,
-            "evento": evento_primeiro,
-            "ranking": ranking,
-            "hora": agora_str(),
-            "league": evento_primeiro.get(
-                "league",
-                ""
-            ),
-        })
-
-    return novos_gols
-
-
-# ============================================================
-# ATUALIZAÇÃO DAS ESTATÍSTICAS DAS FONTES
-# ============================================================
-
-def atualizar_ranking_fontes(
-    resultados,
-    gols
-):
-    for resultado in resultados:
-
-        source = resultado.get(
-            "source"
-        )
-
-        if source not in st.session_state.source_stats:
-            st.session_state.source_stats[
-                source
-            ] = {
-                "consultas": 0,
-                "sucesso": 0,
-                "erros": 0,
-                "primeiros": 0,
-                "latencias": [],
-            }
-
-        stats = st.session_state.source_stats[
-            source
-        ]
-
-        stats["consultas"] += 1
-
-        status = str(
-            resultado.get(
-                "status",
-                ""
-            )
-        )
-
-        if status == "OK":
-            stats["sucesso"] += 1
-        else:
-            stats["erros"] += 1
-
-        duracao = resultado.get(
-            "duracao"
-        )
-
-        if duracao:
-            stats["latencias"].append(
-                duracao
-            )
-
-            # Limita memória.
-            stats["latencias"] = (
-                stats["latencias"][-500:]
-            )
-
-    # Quem ganhou cada corrida de gol?
-    for gol in gols:
-
-        vencedor = gol.get(
-            "fonte_primeira"
-        )
-
-        if not vencedor:
-            continue
-
-        if vencedor not in st.session_state.source_stats:
-            st.session_state.source_stats[
-                vencedor
-            ] = {
-                "consultas": 0,
-                "sucesso": 0,
-                "erros": 0,
-                "primeiros": 0,
-                "latencias": [],
-            }
-
-        st.session_state.source_stats[
-            vencedor
-        ]["primeiros"] += 1
-
-
-# ============================================================
-# PROCESSAMENTO DO CICLO
-# ============================================================
-
-def executar_ciclo():
-    resultados, tempo_ciclo = consultar_fontes()
-
-    jogos = indexar_resultados(
-        resultados
+    goals = detect_goals(
+        events
     )
 
-    gols = detectar_gols(
-        jogos
+    ranking = ranking_sources(
+        events
     )
 
-    atualizar_ranking_fontes(
-        resultados,
-        gols
+    elapsed = (
+        time.perf_counter()
+        - cycle_start
     )
 
     st.session_state.last_cycle = {
-        "resultados": resultados,
-        "jogos": jogos,
-        "gols": gols,
-        "tempo": tempo_ciclo,
-        "hora": agora_str(),
+
+        "time":
+            agora(),
+
+        "utc":
+            utc_now(),
+
+        "elapsed":
+            elapsed,
+
+        "events":
+            len(events),
+
+        "goals":
+            len(goals),
     }
 
-    st.session_state.cycle_count += 1
+    # Processa gols
+    for goal in goals:
 
-    return (
-        resultados,
-        jogos,
-        gols,
-        tempo_ciclo
-    )
+        ev = goal["event"]
 
-
-# ============================================================
-# ALERTAS DE GOL
-# ============================================================
-
-def processar_alertas(gols):
-    for gol in gols:
-
-        jogo = gol["jogo"]
-
-        anterior = gol["anterior"]
-
-        novo = gol["novo"]
-
-        fonte = gol["fonte_primeira"]
-
-        mensagem = (
-            "⚽ GOL DETECTADO\n\n"
-            f"{jogo}\n"
-            f"{anterior[0]} x {anterior[1]}"
-            " → "
-            f"{novo[0]} x {novo[1]}\n\n"
-            f"🥇 Primeira fonte: {fonte}\n"
-            f"⏱️ Detecção: {gol['hora']}\n"
+        goal_id = (
+            f"{ev['home']}"
+            f"|{ev['away']}"
+            f"|{goal['new_score']}"
         )
 
-        # ----------------------------------------------------
-        # OPENROUTER
-        # ----------------------------------------------------
+        if (
+            goal_id
+            in st.session_state.sent_goal_ids
+        ):
+            continue
 
-        analise = analisar_gol_openrouter(
-            jogo,
-            f"{anterior[0]} x {anterior[1]}",
-            f"{novo[0]} x {novo[1]}",
-            fonte
+        st.session_state.sent_goal_ids.add(
+            goal_id
         )
 
-        mensagem_completa = (
-            mensagem
-            + "\n🤖 ANÁLISE\n"
-            + analise
-        )
+        ai_text = ""
 
-        # ----------------------------------------------------
-        # HISTÓRICO
-        # ----------------------------------------------------
+        if OPENROUTER_API_KEY:
 
-        registro = {
-            "hora": gol["hora"],
-            "jogo": jogo,
-            "anterior": (
-                f"{anterior[0]} x "
-                f"{anterior[1]}"
-            ),
-            "novo": (
-                f"{novo[0]} x "
-                f"{novo[1]}"
-            ),
-            "primeira_fonte": fonte,
-            "analise": analise,
-            "ranking": gol["ranking"],
-        }
+            ai_text = analyze_goal(
+                goal
+            )
+
+        telegram_status = ""
+
+        if (
+            TELEGRAM_BOT_TOKEN
+            and TELEGRAM_CHAT_ID
+        ):
+
+            ok, message = notify_goal(
+                goal,
+                ai_text,
+            )
+
+            telegram_status = (
+                "Enviado"
+                if ok
+                else message
+            )
 
         st.session_state.goal_history.insert(
+
             0,
-            registro
+
+            {
+                "Hora":
+                    agora(),
+
+                "Jogo":
+                    f"{ev['home']} x "
+                    f"{ev['away']}",
+
+                "Placar":
+                    goal["new_score"],
+
+                "Fonte":
+                    ev["source"],
+
+                "Minuto":
+                    ev.get("minute")
+                    or ev.get("status")
+                    or "-",
+
+                "Telegram":
+                    telegram_status,
+            },
         )
 
-        # máximo 100 eventos
-        st.session_state.goal_history = (
-            st.session_state.goal_history[:100]
-        )
+    # Não deixar a sessão crescer indefinidamente
+    st.session_state.goal_history = (
+        st.session_state.goal_history[:50]
+    )
 
-        # ----------------------------------------------------
-        # TELEGRAM
-        # ----------------------------------------------------
-
-        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
-            enviar_telegram(
-                mensagem_completa
-            )
+    return (
+        results,
+        events,
+        goals,
+        ranking,
+    )
 
 
 # ============================================================
 # SIDEBAR
 # ============================================================
 
-st.sidebar.title("⚙️ Configuração")
+with st.sidebar:
 
-intervalo = st.sidebar.slider(
-    "Intervalo de atualização",
-    min_value=2,
-    max_value=30,
-    value=DEFAULT_REFRESH,
-    step=1
-)
+    st.header(
+        "⚙️ Configuração"
+    )
 
-st.sidebar.markdown("---")
+    intervalo = st.number_input(
 
-st.sidebar.subheader(
-    "🏆 Ligas ESPN"
-)
+        "Atualização",
 
-ligas_selecionadas = st.sidebar.multiselect(
-    "Ligas consultadas pela ESPN",
-    list(ESPN_LEAGUES.keys()),
-    default=[
-        "Brasil Série A",
-        "Brasil Série B",
-        "Inglaterra Premier League",
-        "Espanha LaLiga",
-        "Itália Serie A",
-        "Alemanha Bundesliga",
-        "França Ligue 1",
-    ]
-)
+        min_value=MIN_INTERVAL,
 
-# Atualiza globalmente para esta execução.
-if ligas_selecionadas:
-    ESPN_LEAGUES_ATIVAS = {
-        nome: ESPN_LEAGUES[nome]
-        for nome in ligas_selecionadas
+        max_value=MAX_INTERVAL,
+
+        value=DEFAULT_INTERVAL,
+
+        step=1,
+    )
+
+    auto_refresh = st.checkbox(
+
+        "Atualização automática",
+
+        value=True,
+    )
+
+    st.divider()
+
+    st.subheader(
+        "🔑 Fontes"
+    )
+
+    keys = {
+
+        "5Dollar":
+            bool(FIVEDOLLAR_KEY),
+
+        "OpenFoot":
+            bool(OPENFOOT_KEY),
+
+        "FootballData":
+            bool(FOOTBALL_DATA_TOKEN),
+
+        "API-Football":
+            bool(API_FOOTBALL_KEY),
+
+        "TheSportsDB":
+            bool(THESPORTSDB_KEY),
+
+        "OpenRouter":
+            bool(OPENROUTER_API_KEY),
+
+        "Telegram":
+            bool(
+                TELEGRAM_BOT_TOKEN
+                and TELEGRAM_CHAT_ID
+            ),
     }
-else:
-    ESPN_LEAGUES_ATIVAS = {}
+
+    for name, enabled in keys.items():
+
+        if enabled:
+
+            st.write(
+                f"🟢 {name}"
+            )
+
+        else:
+
+            st.write(
+                f"⚪ {name}"
+            )
+
+    st.divider()
+
+    if (
+        time.time()
+        <
+        st.session_state.espn_block_until
+    ):
+
+        remaining = int(
+            st.session_state
+            .espn_block_until
+            - time.time()
+        )
+
+        st.warning(
+            f"ESPN em cooldown: "
+            f"{remaining}s"
+        )
+
+    if st.button(
+        "🔄 Executar agora",
+        use_container_width=True,
+    ):
+
+        st.rerun()
 
 
-# Substitui o conjunto usado pela função.
-ESPN_LEAGUES = ESPN_LEAGUES_ATIVAS
+# ============================================================
+# EXECUTA CICLO
+# ============================================================
 
-
-st.sidebar.markdown("---")
-
-st.sidebar.subheader(
-    "🔔 Alertas"
-)
-
-telegram_ativo = bool(
-    TELEGRAM_BOT_TOKEN
-    and TELEGRAM_CHAT_ID
-)
-
-openrouter_ativo = bool(
-    OPENROUTER_API_KEY
+results, events, goals, ranking = (
+    run_cycle()
 )
 
 
@@ -1750,13 +2399,190 @@ openrouter_ativo = bool(
 # ============================================================
 
 st.title(
-    "⚽ Football Goal Race"
+    "⚽ Football Scanner"
 )
 
 st.caption(
-    "Monitoramento simultâneo de fontes "
-    "com corrida de chegada do placar."
+    "Monitoramento simultâneo "
+    "de múltiplas fontes"
 )
+
+
+# ============================================================
+# MÉTRICAS
+# ============================================================
+
+ok_count = sum(
+    1
+    for result in results
+    if result["ok"]
+)
+
+error_count = (
+    len(results)
+    - ok_count
+)
+
+cycle_time = (
+    st.session_state.last_cycle[
+        "elapsed"
+    ]
+    if st.session_state.last_cycle
+    else 0
+)
+
+col1, col2, col3, col4, col5 = (
+    st.columns(5)
+)
+
+with col1:
+
+    st.metric(
+        "Fontes OK",
+        ok_count,
+    )
+
+with col2:
+
+    st.metric(
+        "Fontes com erro",
+        error_count,
+    )
+
+with col3:
+
+    st.metric(
+        "Jogos",
+        len(events),
+    )
+
+with col4:
+
+    st.metric(
+        "Gols novos",
+        len(goals),
+    )
+
+with col5:
+
+    st.metric(
+        "Ciclo",
+        f"{cycle_time:.2f}s",
+    )
+
+
+# ============================================================
+# GOLS
+# ============================================================
+
+st.subheader(
+    "🚨 Gols detectados"
+)
+
+if not goals:
+
+    st.info(
+        "Nenhuma mudança de placar "
+        "detectada neste ciclo."
+    )
+
+else:
+
+    for goal in goals:
+
+        ev = goal["event"]
+
+        st.success(
+
+            f"⚽ **{ev['home']} "
+            f"{goal['new_score']} "
+            f"{ev['away']}** "
+            f"| {ev['source']} "
+            f"| "
+            f"{ev.get('minute') or ev.get('status') or '-'}"
+        )
+
+        if OPENROUTER_API_KEY:
+
+            with st.expander(
+                "🤖 Análise OpenRouter"
+            ):
+
+                st.write(
+                    analyze_goal(
+                        goal
+                    )
+                )
+
+
+# ============================================================
+# RANKING DE CHEGADA
+# ============================================================
+
+st.subheader(
+    "🏁 Quem chegou primeiro?"
+)
+
+st.caption(
+    "A posição é baseada no instante "
+    "absoluto em que cada resposta foi "
+    "recebida neste ciclo."
+)
+
+if ranking:
+
+    first_time = ranking[0][
+        "received_at"
+    ]
+
+    ranking_rows = []
+
+    for pos, ev in enumerate(
+        ranking[:50],
+        start=1,
+    ):
+
+        delta = (
+            ev["received_at"]
+            - first_time
+        ) * 1000
+
+        ranking_rows.append(
+
+            {
+                "#":
+                    pos,
+
+                "Fonte":
+                    ev["source"],
+
+                "Jogo":
+                    f"{ev['home']} "
+                    f"x {ev['away']}",
+
+                "Placar":
+                    ev["score"],
+
+                "Diferença":
+                    f"{delta:.0f} ms",
+            }
+        )
+
+    st.dataframe(
+
+        ranking_rows,
+
+        use_container_width=True,
+
+        hide_index=True,
+    )
+
+else:
+
+    st.info(
+        "Nenhuma fonte retornou "
+        "jogos neste ciclo."
+    )
 
 
 # ============================================================
@@ -1764,397 +2590,145 @@ st.caption(
 # ============================================================
 
 st.subheader(
-    "📡 Status das fontes"
+    "📡 Status das APIs"
 )
 
-col1, col2, col3, col4, col5 = st.columns(5)
+status_rows = []
 
-with col1:
-    st.metric(
-        "ESPN",
-        (
-            "🟢 ATIVA"
-            if time.time() >= st.session_state.espn_block_until
-            else "🟠 PAUSADA"
-        )
-    )
-
-with col2:
-    st.metric(
-        "FiveDollar",
-        (
-            "🟢 ATIVA"
-            if FIVEDOLLAR_FOOTBALL_API_KEY
-            else "🟡 SEM CHAVE"
-        )
-    )
-
-with col3:
-    st.metric(
-        "OpenFoot",
-        (
-            "🟢 ATIVA"
-            if OPENFOOT_API_KEY
-            else "🟡 SEM CHAVE"
-        )
-    )
-
-with col4:
-    st.metric(
-        "FootballData",
-        (
-            "🟢 ATIVA"
-            if FOOTBALL_DATA_API_TOKEN
-            else "🟡 SEM TOKEN"
-        )
-    )
-
-with col5:
-    st.metric(
-        "TheSportsDB",
-        (
-            "🟢 CONFIGURADA"
-            if THESPORTSDB_API_KEY
-            else "🟡 SEM CHAVE"
-        )
-    )
-
-
-# ============================================================
-# OPENROUTER / TELEGRAM
-# ============================================================
-
-col_a, col_b = st.columns(2)
-
-with col_a:
-    st.info(
-        "🤖 OpenRouter: "
-        + (
-            "ATIVO"
-            if openrouter_ativo
-            else "DESATIVADO"
-        )
-    )
-
-with col_b:
-    st.info(
-        "📲 Telegram: "
-        + (
-            "ATIVO"
-            if telegram_ativo
-            else "DESATIVADO"
-        )
-    )
-
-
-# ============================================================
-# EXECUTAR
-# ============================================================
-
-with st.spinner(
-    "Consultando as 5 fontes simultaneamente..."
+for result in sorted(
+    results,
+    key=lambda x:
+        x["source"],
 ):
-    (
-        resultados,
-        jogos,
-        gols,
-        tempo_ciclo
-    ) = executar_ciclo()
 
+    status_rows.append(
 
-# Processar alertas somente após
-# detectar as mudanças.
-processar_alertas(
-    gols
+        {
+            "Fonte":
+                result["source"],
+
+            "Status":
+                "🟢 OK"
+                if result["ok"]
+                else "🔴 ERRO",
+
+            "HTTP":
+                result.get(
+                    "status"
+                )
+                or "-",
+
+            "Jogos":
+                len(
+                    result.get(
+                        "events",
+                        [],
+                    )
+                ),
+
+            "Tempo":
+                (
+                    f"{result['elapsed'] * 1000:.0f} ms"
+                    if result.get(
+                        "elapsed"
+                    ) is not None
+                    else "-"
+                ),
+
+            "Erro":
+                result.get(
+                    "error"
+                )
+                or "-",
+        }
+    )
+
+st.dataframe(
+
+    status_rows,
+
+    use_container_width=True,
+
+    hide_index=True,
 )
 
 
 # ============================================================
-# RESUMO
+# JOGOS
 # ============================================================
-
-st.markdown("---")
-
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    st.metric(
-        "Jogos encontrados",
-        len(jogos)
-    )
-
-with col2:
-    st.metric(
-        "Gols neste ciclo",
-        len(gols)
-    )
-
-with col3:
-    st.metric(
-        "Tempo do ciclo",
-        f"{tempo_ciclo:.3f}s"
-    )
-
-with col4:
-    st.metric(
-        "Ciclo",
-        st.session_state.cycle_count
-    )
-
-
-# ============================================================
-# GOLS DETECTADOS
-# ============================================================
-
-if gols:
-
-    st.markdown("---")
-
-    st.subheader(
-        "🚨 GOL(S) DETECTADO(S)"
-    )
-
-    for gol in gols:
-
-        st.success(
-            f"⚽ {gol['jogo']}  |  "
-            f"{gol['anterior'][0]} x "
-            f"{gol['anterior'][1]}"
-            " → "
-            f"{gol['novo'][0]} x "
-            f"{gol['novo'][1]}"
-        )
-
-        st.write(
-            f"🥇 **Primeira fonte:** "
-            f"{gol['fonte_primeira']}"
-        )
-
-        if gol.get("league"):
-            st.write(
-                f"🏆 **Liga:** "
-                f"{gol['league']}"
-            )
-
-        st.write(
-            f"🕐 **Detectado às:** "
-            f"{gol['hora']}"
-        )
-
-        if gol["ranking"]:
-
-            tabela = []
-
-            base = (
-                gol["ranking"][0]
-                ["received_at"]
-            )
-
-            for pos, item in enumerate(
-                gol["ranking"],
-                start=1
-            ):
-
-                atraso = (
-                    item["received_at"]
-                    - base
-                )
-
-                tabela.append({
-                    "#": pos,
-                    "Fonte": item["source"],
-                    "Placar": (
-                        f"{item['score'][0]} x "
-                        f"{item['score'][1]}"
-                    ),
-                    "Tempo requisição": (
-                        f"{item['duration']:.3f}s"
-                    ),
-                    "Atraso após 1ª": (
-                        f"+{atraso:.3f}s"
-                    ),
-                })
-
-            st.dataframe(
-                tabela,
-                use_container_width=True,
-                hide_index=True
-            )
-
-        # análise OpenRouter
-        if st.session_state.goal_history:
-
-            analise_atual = (
-                st.session_state.goal_history[0]
-                .get("analise", "")
-            )
-
-            if analise_atual:
-                st.markdown(
-                    "**🤖 OpenRouter**"
-                )
-
-                st.code(
-                    analise_atual,
-                    language="text"
-                )
-
-
-# ============================================================
-# JOGOS AO VIVO
-# ============================================================
-
-st.markdown("---")
 
 st.subheader(
-    "🔴 Jogos monitorados"
+    "🟢 Jogos monitorados"
 )
 
-linhas = []
+if events:
 
-for chave, eventos in jogos.items():
+    game_rows = []
 
-    if not eventos:
-        continue
+    for ev in sorted(
 
-    # Preferir o último placar conhecido.
-    eventos_ordenados = sorted(
-        eventos,
-        key=lambda x: x.get(
-            "received_at",
-            0
+        events,
+
+        key=lambda x: (
+            x["home"].lower(),
+            x["away"].lower(),
+        ),
+    ):
+
+        game_rows.append(
+
+            {
+                "Fonte":
+                    ev["source"],
+
+                "Casa":
+                    ev["home"],
+
+                "Placar":
+                    ev["score"],
+
+                "Fora":
+                    ev["away"],
+
+                "Minuto":
+                    ev.get(
+                        "minute"
+                    )
+                    or "-",
+
+                "Status":
+                    ev.get(
+                        "status"
+                    )
+                    or "-",
+
+                "Liga":
+                    ev.get(
+                        "league"
+                    )
+                    or "-",
+            }
         )
-    )
-
-    ultimo = eventos_ordenados[-1]
-
-    fontes = sorted(
-        set(
-            e["source"]
-            for e in eventos
-        )
-    )
-
-    linhas.append({
-        "Jogo": nome_jogo(
-            ultimo["home"],
-            ultimo["away"]
-        ),
-        "Placar": (
-            f"{ultimo['home_score']} x "
-            f"{ultimo['away_score']}"
-        ),
-        "Minuto": (
-            ultimo.get("minute")
-            or "-"
-        ),
-        "Liga": (
-            ultimo.get("league")
-            or "-"
-        ),
-        "Fontes": ", ".join(fontes),
-    })
-
-
-if linhas:
-
-    linhas.sort(
-        key=lambda x: x["Jogo"]
-    )
 
     st.dataframe(
-        linhas,
+
+        game_rows,
+
         use_container_width=True,
-        hide_index=True
+
+        hide_index=True,
     )
 
 else:
 
-    st.warning(
-        "Nenhum jogo ao vivo foi retornado "
-        "pelas fontes neste ciclo."
+    st.info(
+        "Nenhum jogo retornado."
     )
 
 
 # ============================================================
-# RANKING DAS FONTES
+# HISTÓRICO DE GOLS
 # ============================================================
-
-st.markdown("---")
-
-st.subheader(
-    "🏁 Ranking de velocidade das fontes"
-)
-
-ranking_fontes = []
-
-for source, stats in (
-    st.session_state.source_stats.items()
-):
-
-    latencias = stats.get(
-        "latencias",
-        []
-    )
-
-    media = (
-        sum(latencias) / len(latencias)
-        if latencias
-        else 0
-    )
-
-    ranking_fontes.append({
-        "Fonte": source,
-        "🥇 Primeiras": stats.get(
-            "primeiros",
-            0
-        ),
-        "Consultas": stats.get(
-            "consultas",
-            0
-        ),
-        "Sucesso": stats.get(
-            "sucesso",
-            0
-        ),
-        "Erros": stats.get(
-            "erros",
-            0
-        ),
-        "Latência média": (
-            f"{media:.3f}s"
-            if media
-            else "-"
-        ),
-    })
-
-
-ranking_fontes.sort(
-    key=lambda x: (
-        -x["🥇 Primeiras"],
-        float(
-            x["Latência média"]
-            .replace("s", "")
-        )
-        if x["Latência média"] != "-"
-        else 999
-    )
-)
-
-if ranking_fontes:
-
-    st.dataframe(
-        ranking_fontes,
-        use_container_width=True,
-        hide_index=True
-    )
-
-
-# ============================================================
-# HISTÓRICO
-# ============================================================
-
-st.markdown("---")
 
 st.subheader(
     "📜 Histórico de gols"
@@ -2162,98 +2736,52 @@ st.subheader(
 
 if st.session_state.goal_history:
 
-    historico = []
-
-    for item in (
-        st.session_state.goal_history
-    ):
-
-        historico.append({
-            "Hora": item["hora"],
-            "Jogo": item["jogo"],
-            "Anterior": item["anterior"],
-            "Novo": item["novo"],
-            "Primeira fonte": (
-                item["primeira_fonte"]
-            ),
-        })
-
     st.dataframe(
-        historico,
+
+        st.session_state.goal_history,
+
         use_container_width=True,
-        hide_index=True
+
+        hide_index=True,
     )
 
 else:
 
     st.info(
-        "Nenhum gol novo detectado desde "
-        "o início do monitor."
+        "Nenhum gol detectado "
+        "nesta sessão."
     )
 
 
 # ============================================================
-# DIAGNÓSTICO DAS FONTES
+# CONFIGURAÇÃO
 # ============================================================
 
-st.markdown("---")
-
-st.subheader(
-    "🔧 Diagnóstico"
-)
-
-diagnostico = []
-
-for resultado in sorted(
-    resultados,
-    key=lambda x: x.get(
-        "recebido",
-        float("inf")
-    )
+with st.expander(
+    "🔐 Configuração das chaves"
 ):
 
-    diagnostico.append({
-        "Fonte": resultado.get(
-            "source"
-        ),
-        "Status": resultado.get(
-            "status"
-        ),
-        "Jogos": len(
-            resultado.get(
-                "events",
-                []
-            )
-        ),
-        "Resposta": (
-            f"{resultado.get('duracao', 0):.3f}s"
-        ),
-    })
+    st.markdown(
+        """
+### Streamlit Secrets
 
+No Streamlit Cloud, coloque as chaves nos **Secrets**:
 
-st.dataframe(
-    diagnostico,
-    use_container_width=True,
-    hide_index=True
-)
+```toml
+FOOTBALL_DATA_API_TOKEN = "SUA_CHAVE"
 
+FIVEDOLLAR_FOOTBALL_API_KEY = "SUA_CHAVE"
 
-# ============================================================
-# RODAPÉ
-# ============================================================
+THESPORTSDB_API_KEY = "SUA_CHAVE"
 
-st.caption(
-    f"Último ciclo: "
-    f"{st.session_state.last_cycle['hora'] "
-    if st.session_state.last_cycle else agora_str()} "
-    f"| Próxima atualização em {intervalo}s"
-)
+OPENFOOT_API_KEY = "SUA_CHAVE"
 
+API_FOOTBALL_KEY = "SUA_CHAVE"
 
-# ============================================================
-# AUTO REFRESH
-# ============================================================
+OPENROUTER_API_KEY = "SUA_CHAVE"
 
-time.sleep(intervalo)
+OPENROUTER_MODEL = "openrouter/free"
 
-st.rerun()
+TELEGRAM_BOT_TOKEN = "SEU_TOKEN"
+
+TELEGRAM_CHAT_ID = "SEU_CHAT_ID"
