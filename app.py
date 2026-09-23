@@ -1,6 +1,6 @@
+```python
 import os
 import time
-import threading
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from importlib.util import spec_from_file_location, module_from_spec
@@ -13,29 +13,58 @@ import requests
 # CONFIGURAÇÃO
 # ============================================================
 
+# Pasta onde este app.py está localizado.
+# Funciona tanto localmente quanto no Streamlit Cloud.
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+# Arquivo do scanner original.
+# O padrão agora é scanner.py, que deve estar no mesmo
+# diretório deste app.py.
 SCANNER_FILE = os.getenv(
     "SCANNER_FILE",
-    r"Texto colado(5).txt"
+    os.path.join(BASE_DIR, "scanner.py")
 )
 
-# Intervalo entre ciclos.
-# 2 segundos é agressivo, mas leve o suficiente para um PC fraco.
-POLL_INTERVAL = float(os.getenv("GOAL_POLL_INTERVAL", "2.0"))
 
-# Timeout específico do monitor.
-# As funções do scanner usam a variável TIMEOUT global.
-FAST_TIMEOUT = float(os.getenv("GOAL_FAST_TIMEOUT", "4"))
+# Intervalo entre ciclos
+POLL_INTERVAL = float(
+    os.getenv("GOAL_POLL_INTERVAL", "2.0")
+)
+
+
+# Timeout das APIs
+FAST_TIMEOUT = float(
+    os.getenv("GOAL_FAST_TIMEOUT", "4")
+)
+
 
 BRT = ZoneInfo("America/Sao_Paulo")
 
-# Telegram — opcional.
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 
-# Se True, mostra também as atualizações no console.
+# ============================================================
+# TELEGRAM
+# ============================================================
+
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    ""
+)
+
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID",
+    ""
+)
+
+
+# ============================================================
+# ALERTAS
+# ============================================================
+
 CONSOLE_ALERT = True
 
-# Som do Windows.
+# No Streamlit Cloud não existe winsound.
+# A função abaixo trata isso automaticamente.
 WINDOWS_BEEP = True
 
 
@@ -44,30 +73,77 @@ WINDOWS_BEEP = True
 # ============================================================
 
 def carregar_scanner():
-    """
-    Carrega o arquivo original sem executar o main() do Streamlit.
-    O arquivo original só chama main() quando __name__ == '__main__',
-    portanto a importação é segura.
-    """
+
     caminho = os.path.abspath(SCANNER_FILE)
 
-    if not os.path.exists(caminho):
-        raise FileNotFoundError(
-            f"Scanner não encontrado:\n{caminho}\n\n"
-            "Defina SCANNER_FILE com o caminho completo do seu arquivo."
+    print(
+        f"[SCANNER] Procurando arquivo: {caminho}"
+    )
+
+    # --------------------------------------------------------
+    # Verifica se o arquivo existe
+    # --------------------------------------------------------
+
+    if not os.path.isfile(caminho):
+
+        try:
+            arquivos = sorted(
+                os.listdir(BASE_DIR)
+            )
+
+        except Exception:
+            arquivos = []
+
+        lista_arquivos = "\n".join(
+            f"  - {arquivo}"
+            for arquivo in arquivos
         )
 
-    spec = spec_from_file_location("scanner_original", caminho)
+        raise FileNotFoundError(
+            "\n"
+            "SCANNER NÃO ENCONTRADO\n"
+            "======================\n\n"
+            f"Caminho procurado:\n"
+            f"{caminho}\n\n"
+            "Arquivos encontrados no projeto:\n"
+            f"{lista_arquivos}\n\n"
+            "O arquivo scanner.py precisa estar "
+            "no mesmo diretório do app.py."
+        )
 
-    if spec is None or spec.loader is None:
-        raise RuntimeError("Não foi possível carregar o scanner original.")
+    # --------------------------------------------------------
+    # Carrega scanner.py como módulo
+    # --------------------------------------------------------
+
+    spec = spec_from_file_location(
+        "scanner_original",
+        caminho
+    )
+
+    if spec is None:
+        raise RuntimeError(
+            f"Não foi possível criar o módulo para:\n{caminho}"
+        )
+
+    if spec.loader is None:
+        raise RuntimeError(
+            f"Loader inválido para:\n{caminho}"
+        )
 
     scanner = module_from_spec(spec)
+
+    # Executa o scanner original
     spec.loader.exec_module(scanner)
 
-    # O scanner original usa TIMEOUT no request_json().
-    # Reduzimos somente para este monitor.
+    # --------------------------------------------------------
+    # Ajusta TIMEOUT
+    # --------------------------------------------------------
+
     scanner.TIMEOUT = FAST_TIMEOUT
+
+    print(
+        f"[SCANNER] Carregado com sucesso: {caminho}"
+    )
 
     return scanner
 
@@ -80,6 +156,7 @@ scanner = carregar_scanner()
 # ============================================================
 
 def telegram_configurado():
+
     return bool(
         TELEGRAM_BOT_TOKEN.strip()
         and TELEGRAM_CHAT_ID.strip()
@@ -87,12 +164,14 @@ def telegram_configurado():
 
 
 def enviar_telegram(texto):
+
     if not telegram_configurado():
         return False
 
     url = (
-        f"https://api.telegram.org/bot"
-        f"{TELEGRAM_BOT_TOKEN}/sendMessage"
+        "https://api.telegram.org/bot"
+        f"{TELEGRAM_BOT_TOKEN}"
+        "/sendMessage"
     )
 
     payload = {
@@ -102,6 +181,7 @@ def enviar_telegram(texto):
     }
 
     try:
+
         response = requests.post(
             url,
             json=payload,
@@ -111,7 +191,11 @@ def enviar_telegram(texto):
         return response.ok
 
     except Exception as exc:
-        print(f"[TELEGRAM] erro: {exc}")
+
+        print(
+            f"[TELEGRAM] erro: {exc}"
+        )
+
         return False
 
 
@@ -120,16 +204,26 @@ def enviar_telegram(texto):
 # ============================================================
 
 def alerta_local():
+
     if not WINDOWS_BEEP:
         return
 
     try:
+
         import winsound
 
-        winsound.Beep(1200, 180)
-        winsound.Beep(1500, 220)
+        winsound.Beep(
+            1200,
+            180
+        )
+
+        winsound.Beep(
+            1500,
+            220
+        )
 
     except Exception:
+        # Streamlit Cloud/Linux não possui winsound.
         pass
 
 
@@ -138,22 +232,26 @@ def alerta_local():
 # ============================================================
 
 def numero_score(valor):
-    """
-    Converte placar para inteiro.
-    Retorna None quando a fonte não informou um placar válido.
-    """
+
     if valor is None:
         return None
 
     try:
         return int(float(valor))
+
     except Exception:
         return None
 
 
 def placar(evento):
-    h = numero_score(evento.get("home_score"))
-    a = numero_score(evento.get("away_score"))
+
+    h = numero_score(
+        evento.get("home_score")
+    )
+
+    a = numero_score(
+        evento.get("away_score")
+    )
 
     if h is None or a is None:
         return None
@@ -162,117 +260,183 @@ def placar(evento):
 
 
 def chave_base(evento):
-    """
-    Identidade estável da partida.
 
-    Prioridade:
-      1. source + source_id
-      2. IDs dos times
-      3. nomes + liga
-    """
-    source = str(evento.get("source") or "").strip().lower()
-    source_id = str(evento.get("source_id") or "").strip()
+    source = str(
+        evento.get("source") or ""
+    ).strip().lower()
+
+    source_id = str(
+        evento.get("source_id") or ""
+    ).strip()
 
     if source_id:
-        return f"{source}:{source_id}"
+        return (
+            f"{source}:{source_id}"
+        )
 
-    home_id = str(evento.get("home_id") or "").strip()
-    away_id = str(evento.get("away_id") or "").strip()
+    home_id = str(
+        evento.get("home_id") or ""
+    ).strip()
+
+    away_id = str(
+        evento.get("away_id") or ""
+    ).strip()
 
     if home_id or away_id:
-        return f"teams:{home_id}:{away_id}"
+        return (
+            f"teams:{home_id}:{away_id}"
+        )
 
-    home = str(evento.get("home") or "").strip().lower()
-    away = str(evento.get("away") or "").strip().lower()
-    league = str(evento.get("league") or "").strip().lower()
+    home = str(
+        evento.get("home") or ""
+    ).strip().lower()
 
-    return f"name:{home}:{away}:{league}"
+    away = str(
+        evento.get("away") or ""
+    ).strip().lower()
+
+    league = str(
+        evento.get("league") or ""
+    ).strip().lower()
+
+    return (
+        f"name:{home}:{away}:{league}"
+    )
 
 
 # ============================================================
-# BUSCA RÁPIDA
+# BUSCAS
 # ============================================================
 
 def buscar_tsdb():
+
     hoje = datetime.now(BRT).date()
 
     try:
+
         return [
             scanner.normalize_tsdb_event(ev)
             for ev in scanner.tsdb_day(hoje)
         ]
+
     except Exception as exc:
-        print(f"[TheSportsDB] {exc}")
+
+        print(
+            f"[TheSportsDB] {exc}"
+        )
+
         return []
 
 
 def buscar_football_data():
+
     hoje = datetime.now(BRT).date()
 
     if not scanner.FD_TOKEN:
         return []
 
     try:
+
         return [
             scanner.normalize_fd_event(ev)
-            for ev in scanner.fd_matches(hoje, hoje)
+            for ev in scanner.fd_matches(
+                hoje,
+                hoje
+            )
         ]
+
     except Exception as exc:
-        print(f"[football-data.org] {exc}")
+
+        print(
+            f"[football-data.org] {exc}"
+        )
+
         return []
 
 
 def buscar_openfoot():
+
     if not scanner.OPENFOOT_TOKEN:
         return []
 
     try:
+
         resultado = []
 
         for ev in scanner.openfoot_matches():
-            item = scanner.normalize_openfoot_event(ev)
+
+            item = (
+                scanner.normalize_openfoot_event(ev)
+            )
 
             dt = scanner.parse_kickoff(
                 item.get("kickoff")
             )
 
-            if not dt or dt.date() == datetime.now(BRT).date():
+            if (
+                not dt
+                or dt.date()
+                == datetime.now(BRT).date()
+            ):
                 resultado.append(item)
 
         return resultado
 
     except Exception as exc:
-        print(f"[OpenFoot] {exc}")
+
+        print(
+            f"[OpenFoot] {exc}"
+        )
+
         return []
 
 
 def buscar_5dollar():
+
     hoje = datetime.now(BRT).date()
 
     if not scanner.FD5_TOKEN:
         return []
 
     try:
+
         return [
             scanner.normalize_fd5_event(ev)
             for ev in scanner.fd5_day(hoje)
         ]
+
     except Exception as exc:
-        print(f"[5Dollar] {exc}")
+
+        print(
+            f"[5Dollar] {exc}"
+        )
+
         return []
 
 
+# ============================================================
+# CARREGAR EVENTOS
+# ============================================================
+
 def carregar_eventos_rapido():
-    """
-    Diferente do load_global_events() original, as fontes são
-    consultadas simultaneamente. Isso reduz a latência total
-    do ciclo quando existem várias APIs configuradas.
-    """
+
     funcoes = [
-        ("TheSportsDB", buscar_tsdb),
-        ("football-data.org", buscar_football_data),
-        ("OpenFoot", buscar_openfoot),
-        ("5Dollar", buscar_5dollar),
+        (
+            "TheSportsDB",
+            buscar_tsdb
+        ),
+        (
+            "football-data.org",
+            buscar_football_data
+        ),
+        (
+            "OpenFoot",
+            buscar_openfoot
+        ),
+        (
+            "5Dollar",
+            buscar_5dollar
+        ),
     ]
 
     bruto = []
@@ -282,38 +446,62 @@ def carregar_eventos_rapido():
     ) as executor:
 
         futuros = {
-            executor.submit(funcao): nome
+            executor.submit(
+                funcao
+            ): nome
+
             for nome, funcao in funcoes
         }
 
-        for futuro in as_completed(futuros):
+        for futuro in as_completed(
+            futuros
+        ):
+
             nome = futuros[futuro]
 
             try:
+
                 eventos = futuro.result()
 
                 if eventos:
                     bruto.extend(eventos)
 
             except Exception as exc:
-                print(f"[{nome}] erro: {exc}")
 
-    # Usa a mesma lógica de merge/deduplicação do scanner original.
+                print(
+                    f"[{nome}] erro: {exc}"
+                )
+
     try:
-        return scanner.merge_events(bruto)
+
+        return scanner.merge_events(
+            bruto
+        )
+
     except Exception as exc:
-        print(f"[MERGE] {exc}")
+
+        print(
+            f"[MERGE] {exc}"
+        )
+
         return bruto
 
 
 # ============================================================
-# FILTRAR PARTIDAS AO VIVO
+# AO VIVO
 # ============================================================
 
 def esta_ao_vivo(evento):
+
     try:
-        return scanner.classify_event(evento) == "live"
+
+        return (
+            scanner.classify_event(evento)
+            == "live"
+        )
+
     except Exception:
+
         status = str(
             evento.get("status") or ""
         ).strip().upper()
@@ -333,10 +521,15 @@ def esta_ao_vivo(evento):
 
 
 # ============================================================
-# MENSAGEM
+# MENSAGEM DE GOL
 # ============================================================
 
-def mensagem_gol(evento, anterior, atual):
+def mensagem_gol(
+    evento,
+    anterior,
+    atual
+):
+
     old_h, old_a = anterior
     new_h, new_a = atual
 
@@ -344,39 +537,58 @@ def mensagem_gol(evento, anterior, atual):
     delta_a = new_a - old_a
 
     if delta_h > 0 and delta_a == 0:
+
         lado = "🏠 GOL DO MANDANTE"
         gols = delta_h
 
     elif delta_a > 0 and delta_h == 0:
+
         lado = "✈️ GOL DO VISITANTE"
         gols = delta_a
 
     elif delta_h > 0 or delta_a > 0:
+
         lado = "⚽ GOL"
         gols = delta_h + delta_a
 
     else:
+
         return None
 
-    home = evento.get("home") or "Mandante"
-    away = evento.get("away") or "Visitante"
+    home = (
+        evento.get("home")
+        or "Mandante"
+    )
 
-    league = evento.get("league") or "-"
-    source = evento.get("source") or "-"
+    away = (
+        evento.get("away")
+        or "Visitante"
+    )
 
-    agora = datetime.now(BRT).strftime("%H:%M:%S")
+    league = (
+        evento.get("league")
+        or "-"
+    )
 
-    texto = (
+    source = (
+        evento.get("source")
+        or "-"
+    )
+
+    agora = datetime.now(
+        BRT
+    ).strftime("%H:%M:%S")
+
+    return (
         f"⚽ {lado}\n\n"
         f"{home} {new_h} x {new_a} {away}\n\n"
-        f"📊 Placar anterior: {old_h}-{old_a}\n"
+        f"📊 Placar anterior: "
+        f"{old_h}-{old_a}\n"
         f"🔥 Gol detectado: +{gols}\n"
         f"🏆 Liga: {league}\n"
         f"📡 Fonte: {source}\n"
         f"🕐 Detecção: {agora} BRT"
     )
-
-    return texto
 
 
 # ============================================================
@@ -386,45 +598,60 @@ def mensagem_gol(evento, anterior, atual):
 class MonitorGols:
 
     def __init__(self):
+
         self.placares = {}
+
         self.gols_notificados = set()
+
         self.running = False
 
         self.ciclos = 0
+
         self.ultima_quantidade_live = 0
 
     def notificar(self, texto):
+
         if CONSOLE_ALERT:
-            print("\n" + "=" * 60)
+
+            print(
+                "\n"
+                + "=" * 60
+            )
+
             print(texto)
-            print("=" * 60 + "\n")
+
+            print(
+                "=" * 60
+                + "\n"
+            )
 
         alerta_local()
 
         if telegram_configurado():
-            ok = enviar_telegram(texto)
+
+            ok = enviar_telegram(
+                texto
+            )
 
             if ok:
-                print("[TELEGRAM] alerta enviado.")
+                print(
+                    "[TELEGRAM] alerta enviado."
+                )
 
     def detectar(self, eventos):
-        """
-        Detecta somente aumento do placar.
-
-        Isso evita alertar quando:
-          - uma API corrige o placar;
-          - uma partida muda de fonte;
-          - o placar inicial já era 1-0;
-          - a mesma atualização é recebida várias vezes.
-        """
 
         vivos = [
-            ev for ev in eventos
-            if esta_ao_vivo(ev)
-            and placar(ev) is not None
+            ev
+            for ev in eventos
+            if (
+                esta_ao_vivo(ev)
+                and placar(ev) is not None
+            )
         ]
 
-        self.ultima_quantidade_live = len(vivos)
+        self.ultima_quantidade_live = (
+            len(vivos)
+        )
 
         for evento in vivos:
 
@@ -433,25 +660,36 @@ class MonitorGols:
             if atual is None:
                 continue
 
-            chave = chave_base(evento)
+            chave = chave_base(
+                evento
+            )
 
-            anterior = self.placares.get(chave)
+            anterior = self.placares.get(
+                chave
+            )
 
-            # Primeiro contato: apenas registra.
-            # Não dispara alerta de gol que ocorreu antes do bot iniciar.
             if anterior is None:
+
                 self.placares[chave] = atual
+
                 continue
 
-            old_total = anterior[0] + anterior[1]
-            new_total = atual[0] + atual[1]
+            old_total = (
+                anterior[0]
+                + anterior[1]
+            )
 
-            # Nenhum gol novo.
+            new_total = (
+                atual[0]
+                + atual[1]
+            )
+
             if new_total <= old_total:
+
                 self.placares[chave] = atual
+
                 continue
 
-            # Garante que só notificamos cada mudança de placar uma vez.
             assinatura = (
                 chave,
                 atual[0],
@@ -470,11 +708,15 @@ class MonitorGols:
             )
 
             if texto:
-                self.gols_notificados.add(assinatura)
-                self.notificar(texto)
 
-        # Limpa partidas antigas do dicionário para não crescer
-        # indefinidamente durante vários dias de execução.
+                self.gols_notificados.add(
+                    assinatura
+                )
+
+                self.notificar(
+                    texto
+                )
+
         chaves_vivas = {
             chave_base(ev)
             for ev in vivos
@@ -487,59 +729,87 @@ class MonitorGols:
         ]
 
         for chave in antigas:
-            self.placares.pop(chave, None)
+
+            self.placares.pop(
+                chave,
+                None
+            )
 
     def ciclo(self):
+
         inicio = time.monotonic()
 
-        eventos = carregar_eventos_rapido()
+        eventos = (
+            carregar_eventos_rapido()
+        )
 
         self.detectar(eventos)
 
-        duracao = time.monotonic() - inicio
+        duracao = (
+            time.monotonic()
+            - inicio
+        )
 
-        return len(eventos), duracao
+        return (
+            len(eventos),
+            duracao
+        )
 
     def iniciar(self):
+
         self.running = True
 
         print("=" * 60)
-        print("⚽ BOT DE GOLS — MONITORAMENTO RÁPIDO")
-        print("=" * 60)
-        print(f"Intervalo: {POLL_INTERVAL:.1f}s")
-        print(f"Timeout API: {FAST_TIMEOUT:.1f}s")
         print(
-            "Telegram:",
-            "CONFIGURADO" if telegram_configurado()
-            else "não configurado"
+            "⚽ BOT DE GOLS — "
+            "MONITORAMENTO RÁPIDO"
         )
         print("=" * 60)
 
-        # Carrega o placar inicial antes de começar a detectar.
-        # Assim o bot não dispara falsos gols ao iniciar.
-        primeiro = True
+        print(
+            f"Intervalo: "
+            f"{POLL_INTERVAL:.1f}s"
+        )
+
+        print(
+            f"Timeout API: "
+            f"{FAST_TIMEOUT:.1f}s"
+        )
+
+        print(
+            "Telegram:",
+            (
+                "CONFIGURADO"
+                if telegram_configurado()
+                else "não configurado"
+            )
+        )
+
+        print("=" * 60)
 
         while self.running:
 
             try:
+
                 self.ciclos += 1
 
-                quantidade, duracao = self.ciclo()
-
-                agora = datetime.now(BRT).strftime(
-                    "%H:%M:%S"
+                quantidade, duracao = (
+                    self.ciclo()
                 )
+
+                agora = datetime.now(
+                    BRT
+                ).strftime("%H:%M:%S")
 
                 print(
                     f"[{agora}] "
                     f"ciclo={self.ciclos} | "
                     f"eventos={quantidade} | "
-                    f"ao vivo={self.ultima_quantidade_live} | "
+                    f"ao vivo="
+                    f"{self.ultima_quantidade_live} | "
                     f"tempo={duracao:.2f}s"
                 )
 
-                # Se o ciclo demorou mais que o intervalo,
-                # inicia o próximo imediatamente.
                 espera = max(
                     0.1,
                     POLL_INTERVAL - duracao
@@ -548,16 +818,25 @@ class MonitorGols:
                 time.sleep(espera)
 
             except KeyboardInterrupt:
-                print("\nBot encerrado pelo usuário.")
+
+                print(
+                    "\nBot encerrado."
+                )
+
                 self.running = False
 
             except Exception as exc:
+
                 print(
-                    f"[ERRO MONITOR] {type(exc).__name__}: {exc}"
+                    "[ERRO MONITOR] "
+                    f"{type(exc).__name__}: "
+                    f"{exc}"
                 )
+
                 time.sleep(1)
 
     def parar(self):
+
         self.running = False
 
 
@@ -570,8 +849,14 @@ if __name__ == "__main__":
     bot = MonitorGols()
 
     try:
+
         bot.iniciar()
 
     except KeyboardInterrupt:
+
         bot.parar()
-        print("Encerrado.")
+
+        print(
+            "Encerrado."
+        )
+```
