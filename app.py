@@ -1,602 +1,589 @@
+# ============================================================
+# BOT DE GOLS — MONITORAMENTO RÁPIDO
+# Baseado no Global Football Scanner
+#
+# Uso:
+#   python bot_gols_instantaneo.py
+#
+# O bot importa as funções/APIs do seu scanner original,
+# consulta as fontes em paralelo e alerta somente quando
+# detecta aumento real no placar.
+# ============================================================
+
 import os
-import requests
-import streamlit as st
+import time
+import threading
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from importlib.util import spec_from_file_location, module_from_spec
+from zoneinfo import ZoneInfo
+
+import requests
+
 
 # ============================================================
 # CONFIGURAÇÃO
 # ============================================================
 
-st.set_page_config(
-    page_title="⚽ IA Futebol",
-    page_icon="⚽",
-    layout="wide"
+SCANNER_FILE = os.getenv(
+    "SCANNER_FILE",
+    r"Texto colado(5).txt"
 )
 
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-MODELS_URL = "https://openrouter.ai/api/v1/models"
+# Intervalo entre ciclos.
+# 2 segundos é agressivo, mas leve o suficiente para um PC fraco.
+POLL_INTERVAL = float(os.getenv("GOAL_POLL_INTERVAL", "2.0"))
+
+# Timeout específico do monitor.
+# As funções do scanner usam a variável TIMEOUT global.
+FAST_TIMEOUT = float(os.getenv("GOAL_FAST_TIMEOUT", "4"))
+
+BRT = ZoneInfo("America/Sao_Paulo")
+
+# Telegram — opcional.
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
+
+# Se True, mostra também as atualizações no console.
+CONSOLE_ALERT = True
+
+# Som do Windows.
+WINDOWS_BEEP = True
 
 
 # ============================================================
-# SECRET
+# CARREGAR O SCANNER ORIGINAL
 # ============================================================
 
-def obter_secret(nome, padrao=""):
+def carregar_scanner():
+    """
+    Carrega o arquivo original sem executar o main() do Streamlit.
+    O arquivo original só chama main() quando __name__ == '__main__',
+    portanto a importação é segura.
+    """
+    caminho = os.path.abspath(SCANNER_FILE)
+
+    if not os.path.exists(caminho):
+        raise FileNotFoundError(
+            f"Scanner não encontrado:\n{caminho}\n\n"
+            "Defina SCANNER_FILE com o caminho completo do seu arquivo."
+        )
+
+    spec = spec_from_file_location("scanner_original", caminho)
+
+    if spec is None or spec.loader is None:
+        raise RuntimeError("Não foi possível carregar o scanner original.")
+
+    scanner = module_from_spec(spec)
+    spec.loader.exec_module(scanner)
+
+    # O scanner original usa TIMEOUT no request_json().
+    # Reduzimos somente para este monitor.
+    scanner.TIMEOUT = FAST_TIMEOUT
+
+    return scanner
+
+
+scanner = carregar_scanner()
+
+
+# ============================================================
+# TELEGRAM
+# ============================================================
+
+def telegram_configurado():
+    return bool(
+        TELEGRAM_BOT_TOKEN.strip()
+        and TELEGRAM_CHAT_ID.strip()
+    )
+
+
+def enviar_telegram(texto):
+    if not telegram_configurado():
+        return False
+
+    url = (
+        f"https://api.telegram.org/bot"
+        f"{TELEGRAM_BOT_TOKEN}/sendMessage"
+    )
+
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": texto,
+        "disable_web_page_preview": True,
+    }
 
     try:
-        valor = st.secrets.get(nome)
+        response = requests.post(
+            url,
+            json=payload,
+            timeout=5
+        )
 
-        if valor:
-            return str(valor).strip()
+        return response.ok
+
+    except Exception as exc:
+        print(f"[TELEGRAM] erro: {exc}")
+        return False
+
+
+# ============================================================
+# ALERTA LOCAL
+# ============================================================
+
+def alerta_local():
+    if not WINDOWS_BEEP:
+        return
+
+    try:
+        import winsound
+
+        winsound.Beep(1200, 180)
+        winsound.Beep(1500, 220)
 
     except Exception:
         pass
 
-    valor = os.getenv(nome, "")
-
-    if valor:
-        return str(valor).strip()
-
-    return padrao
-
-
-OPENROUTER_API_KEY = obter_secret(
-    "OPENROUTER_API_KEY"
-)
-
 
 # ============================================================
-# MODELOS
+# NORMALIZAÇÃO
 # ============================================================
 
-# IMPORTANTE:
-# Você pode trocar essa lista pelos modelos gratuitos
-# disponíveis atualmente na sua conta.
-
-MODELOS_GRATUITOS = [
-    "openrouter/free",
-]
-
-
-# ============================================================
-# HEADERS
-# ============================================================
-
-def headers_openrouter():
-
-    return {
-        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-        "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/",
-        "X-Title": "IA Futebol"
-    }
-
-
-# ============================================================
-# TESTAR CHAVE
-# ============================================================
-
-def testar_chave():
-
-    if not OPENROUTER_API_KEY:
-
-        return False, "Chave não encontrada."
+def numero_score(valor):
+    """
+    Converte placar para inteiro.
+    Retorna None quando a fonte não informou um placar válido.
+    """
+    if valor is None:
+        return None
 
     try:
+        return int(float(valor))
+    except Exception:
+        return None
 
-        resposta = requests.get(
-            MODELS_URL,
-            headers={
-                "Authorization":
-                    f"Bearer {OPENROUTER_API_KEY}"
-            },
-            timeout=30
-        )
 
-        if resposta.status_code == 200:
+def placar(evento):
+    h = numero_score(evento.get("home_score"))
+    a = numero_score(evento.get("away_score"))
 
-            return True, "Chave válida."
+    if h is None or a is None:
+        return None
 
-        try:
-            erro = resposta.json()
-        except:
-            erro = resposta.text
+    return h, a
 
-        return False, (
-            f"HTTP {resposta.status_code}\n"
-            f"{erro}"
-        )
 
-    except Exception as e:
+def chave_base(evento):
+    """
+    Identidade estável da partida.
 
-        return False, str(e)
+    Prioridade:
+      1. source + source_id
+      2. IDs dos times
+      3. nomes + liga
+    """
+    source = str(evento.get("source") or "").strip().lower()
+    source_id = str(evento.get("source_id") or "").strip()
+
+    if source_id:
+        return f"{source}:{source_id}"
+
+    home_id = str(evento.get("home_id") or "").strip()
+    away_id = str(evento.get("away_id") or "").strip()
+
+    if home_id or away_id:
+        return f"teams:{home_id}:{away_id}"
+
+    home = str(evento.get("home") or "").strip().lower()
+    away = str(evento.get("away") or "").strip().lower()
+    league = str(evento.get("league") or "").strip().lower()
+
+    return f"name:{home}:{away}:{league}"
 
 
 # ============================================================
-# TESTE DE GERAÇÃO
+# BUSCA RÁPIDA
 # ============================================================
 
-def testar_geracao():
-
-    if not OPENROUTER_API_KEY:
-
-        return False, "Chave não encontrada."
-
-    payload = {
-
-        "model": "openrouter/free",
-
-        "messages": [
-            {
-                "role": "user",
-                "content": "Responda apenas: CONEXÃO OK"
-            }
-        ],
-
-        "temperature": 0,
-
-        "max_tokens": 20
-    }
+def buscar_tsdb():
+    hoje = datetime.now(BRT).date()
 
     try:
-
-        resposta = requests.post(
-            OPENROUTER_URL,
-            headers=headers_openrouter(),
-            json=payload,
-            timeout=90
-        )
-
-        try:
-            dados = resposta.json()
-        except:
-            dados = {}
-
-        if resposta.status_code != 200:
-
-            return False, (
-                f"HTTP {resposta.status_code}\n\n"
-                f"{dados if dados else resposta.text}"
-            )
-
-        choices = dados.get(
-            "choices",
-            []
-        )
-
-        if not choices:
-
-            return False, (
-                "A API respondeu, mas não retornou choices."
-            )
-
-        texto = choices[0] \
-            .get("message", {}) \
-            .get("content", "")
-
-        return True, texto
-
-    except Exception as e:
-
-        return False, str(e)
+        return [
+            scanner.normalize_tsdb_event(ev)
+            for ev in scanner.tsdb_day(hoje)
+        ]
+    except Exception as exc:
+        print(f"[TheSportsDB] {exc}")
+        return []
 
 
-# ============================================================
-# CONSULTAR IA
-# ============================================================
+def buscar_football_data():
+    hoje = datetime.now(BRT).date()
 
-def consultar_ia(pergunta):
-
-    if not OPENROUTER_API_KEY:
-
-        return {
-            "ok": False,
-            "texto": "❌ Chave OpenRouter não encontrada."
-        }
-
-
-    system_prompt = """
-Você é uma IA especializada em análise estatística
-de futebol.
-
-Responda em português brasileiro.
-
-O usuário quer analisar partidas de futebol.
-
-Analise:
-
-- mandante
-- visitante
-- forma recente
-- desempenho em casa
-- desempenho fora
-- gols
-- posição
-- confrontos diretos quando disponíveis
-- contexto da competição
-
-Faça uma estimativa:
-
-1 = vitória do mandante
-X = empate
-2 = vitória do visitante
-
-Informe:
-
-Mandante: XX%
-Empate: XX%
-Visitante: XX%
-
-Previsão: 1/X/2
-
-Vencedor projetado:
-TIME
-
-IMPORTANTE:
-
-As probabilidades são estimativas.
-
-Não são garantias.
-
-Não invente dados.
-
-Se não houver informação suficiente,
-diga "Não encontrado".
-
-Também analise quando houver dados suficientes:
-
-BTTS
-Over 1.5
-Over 2.5
-Under 3.5
-
-Para várias partidas, organize em tabela.
-"""
-
-
-    payload = {
-
-        "model": "openrouter/free",
-
-        "messages": [
-
-            {
-                "role": "system",
-                "content": system_prompt
-            },
-
-            {
-                "role": "user",
-                "content": pergunta
-            }
-
-        ],
-
-        "temperature": 0.15,
-
-        "max_tokens": 12000
-    }
-
+    if not scanner.FD_TOKEN:
+        return []
 
     try:
-
-        resposta = requests.post(
-
-            OPENROUTER_URL,
-
-            headers=headers_openrouter(),
-
-            json=payload,
-
-            timeout=180
-        )
+        return [
+            scanner.normalize_fd_event(ev)
+            for ev in scanner.fd_matches(hoje, hoje)
+        ]
+    except Exception as exc:
+        print(f"[football-data.org] {exc}")
+        return []
 
 
-        try:
+def buscar_openfoot():
+    if not scanner.OPENFOOT_TOKEN:
+        return []
 
-            dados = resposta.json()
+    try:
+        resultado = []
 
-        except:
+        for ev in scanner.openfoot_matches():
+            item = scanner.normalize_openfoot_event(ev)
 
-            dados = {}
-
-
-        # ====================================================
-        # ERRO
-        # ====================================================
-
-        if resposta.status_code != 200:
-
-            erro = dados.get(
-                "error",
-                resposta.text
+            dt = scanner.parse_kickoff(
+                item.get("kickoff")
             )
 
-            return {
-                "ok": False,
-                "texto": (
-                    f"❌ ERRO OPENROUTER\n\n"
-                    f"HTTP {resposta.status_code}\n\n"
-                    f"{erro}"
-                )
-            }
+            if not dt or dt.date() == datetime.now(BRT).date():
+                resultado.append(item)
+
+        return resultado
+
+    except Exception as exc:
+        print(f"[OpenFoot] {exc}")
+        return []
 
 
-        # ====================================================
-        # RESPOSTA
-        # ====================================================
+def buscar_5dollar():
+    hoje = datetime.now(BRT).date()
 
-        choices = dados.get(
-            "choices",
-            []
-        )
+    if not scanner.FD5_TOKEN:
+        return []
 
-        if not choices:
-
-            return {
-                "ok": False,
-                "texto": (
-                    "❌ A IA não retornou resposta."
-                )
-            }
+    try:
+        return [
+            scanner.normalize_fd5_event(ev)
+            for ev in scanner.fd5_day(hoje)
+        ]
+    except Exception as exc:
+        print(f"[5Dollar] {exc}")
+        return []
 
 
-        message = choices[0].get(
-            "message",
-            {}
-        )
+def carregar_eventos_rapido():
+    """
+    Diferente do load_global_events() original, as fontes são
+    consultadas simultaneamente. Isso reduz a latência total
+    do ciclo quando existem várias APIs configuradas.
+    """
+    funcoes = [
+        ("TheSportsDB", buscar_tsdb),
+        ("football-data.org", buscar_football_data),
+        ("OpenFoot", buscar_openfoot),
+        ("5Dollar", buscar_5dollar),
+    ]
 
+    bruto = []
 
-        texto = message.get(
-            "content",
-            ""
-        )
+    with ThreadPoolExecutor(
+        max_workers=len(funcoes)
+    ) as executor:
 
-
-        if not texto:
-
-            return {
-                "ok": False,
-                "texto": (
-                    "❌ A resposta veio vazia.\n\n"
-                    + str(message)
-                )
-            }
-
-
-        return {
-            "ok": True,
-            "texto": texto
+        futuros = {
+            executor.submit(funcao): nome
+            for nome, funcao in funcoes
         }
 
+        for futuro in as_completed(futuros):
+            nome = futuros[futuro]
 
-    except requests.Timeout:
+            try:
+                eventos = futuro.result()
 
-        return {
-            "ok": False,
-            "texto": (
-                "⏱️ A OpenRouter demorou demais."
-            )
-        }
+                if eventos:
+                    bruto.extend(eventos)
 
+            except Exception as exc:
+                print(f"[{nome}] erro: {exc}")
 
-    except requests.RequestException as e:
-
-        return {
-            "ok": False,
-            "texto": (
-                f"❌ Erro de conexão:\n\n{e}"
-            )
-        }
+    # Usa a mesma lógica de merge/deduplicação do scanner original.
+    try:
+        return scanner.merge_events(bruto)
+    except Exception as exc:
+        print(f"[MERGE] {exc}")
+        return bruto
 
 
-    except Exception as e:
+# ============================================================
+# FILTRAR PARTIDAS AO VIVO
+# ============================================================
 
-        return {
-            "ok": False,
-            "texto": (
-                f"❌ Erro:\n\n{e}"
-            )
+def esta_ao_vivo(evento):
+    try:
+        return scanner.classify_event(evento) == "live"
+    except Exception:
+        status = str(
+            evento.get("status") or ""
+        ).strip().upper()
+
+        return status in {
+            "LIVE",
+            "IN_PLAY",
+            "INPLAY",
+            "1H",
+            "2H",
+            "HT",
+            "ET",
+            "P",
+            "HALF_TIME",
+            "SECOND_HALF",
         }
 
 
 # ============================================================
-# INTERFACE
+# MENSAGEM
 # ============================================================
 
-st.title("⚽ IA FUTEBOL")
+def mensagem_gol(evento, anterior, atual):
+    old_h, old_a = anterior
+    new_h, new_a = atual
 
-st.subheader(
-    "Análise de jogos e vencedores"
-)
+    delta_h = new_h - old_h
+    delta_a = new_a - old_a
 
+    if delta_h > 0 and delta_a == 0:
+        lado = "🏠 GOL DO MANDANTE"
+        gols = delta_h
 
-# ============================================================
-# SIDEBAR
-# ============================================================
+    elif delta_a > 0 and delta_h == 0:
+        lado = "✈️ GOL DO VISITANTE"
+        gols = delta_a
 
-with st.sidebar:
-
-    st.header("⚙️ Diagnóstico")
-
-
-    if OPENROUTER_API_KEY:
-
-        st.success(
-            "🟢 Chave encontrada"
-        )
+    elif delta_h > 0 or delta_a > 0:
+        lado = "⚽ GOL"
+        gols = delta_h + delta_a
 
     else:
+        return None
 
-        st.error(
-            "🔴 Chave não encontrada"
-        )
+    home = evento.get("home") or "Mandante"
+    away = evento.get("away") or "Visitante"
 
+    league = evento.get("league") or "-"
+    source = evento.get("source") or "-"
 
-    st.divider()
+    agora = datetime.now(BRT).strftime("%H:%M:%S")
 
-
-    # --------------------------------------------------------
-    # TESTE 1
-    # --------------------------------------------------------
-
-    if st.button(
-        "1️⃣ Testar chave",
-        use_container_width=True
-    ):
-
-        ok, mensagem = testar_chave()
-
-        if ok:
-
-            st.success(
-                "🟢 " + mensagem
-            )
-
-        else:
-
-            st.error(
-                mensagem
-            )
-
-
-    # --------------------------------------------------------
-    # TESTE 2
-    # --------------------------------------------------------
-
-    if st.button(
-        "2️⃣ Testar geração",
-        use_container_width=True
-    ):
-
-        with st.spinner(
-            "Testando geração..."
-        ):
-
-            ok, mensagem = testar_geracao()
-
-        if ok:
-
-            st.success(
-                "🟢 Geração funcionando"
-            )
-
-            st.code(
-                mensagem
-            )
-
-        else:
-
-            st.error(
-                "🔴 Geração falhou"
-            )
-
-            st.code(
-                mensagem
-            )
-
-
-    st.divider()
-
-    st.write(
-        "### Modelo"
+    texto = (
+        f"⚽ {lado}\n\n"
+        f"{home} {new_h} x {new_a} {away}\n\n"
+        f"📊 Placar anterior: {old_h}-{old_a}\n"
+        f"🔥 Gol detectado: +{gols}\n"
+        f"🏆 Liga: {league}\n"
+        f"📡 Fonte: {source}\n"
+        f"🕐 Detecção: {agora} BRT"
     )
 
-    st.code(
-        "openrouter/free"
-    )
+    return texto
 
 
 # ============================================================
-# DATA
+# MONITOR
 # ============================================================
 
-data_atual = datetime.now().strftime(
-    "%d/%m/%Y"
-)
+class MonitorGols:
 
+    def __init__(self):
+        self.placares = {}
+        self.gols_notificados = set()
+        self.running = False
 
-# ============================================================
-# BUSCA
-# ============================================================
+        self.ciclos = 0
+        self.ultima_quantidade_live = 0
 
-st.markdown(
-    "## 🔎 Análise"
-)
+    def notificar(self, texto):
+        if CONSOLE_ALERT:
+            print("\n" + "=" * 60)
+            print(texto)
+            print("=" * 60 + "\n")
 
+        alerta_local()
 
-pergunta = st.text_area(
+        if telegram_configurado():
+            ok = enviar_telegram(texto)
 
-    "Digite o que deseja analisar",
+            if ok:
+                print("[TELEGRAM] alerta enviado.")
 
-    value=(
-        f"Analise os jogos de futebol de hoje "
-        f"({data_atual}). "
-        "Para cada jogo disponível nos dados fornecidos, "
-        "mostre mandante, visitante, previsão 1X2, "
-        "probabilidades de mandante, empate e visitante, "
-        "vencedor projetado e justificativa."
-    ),
+    def detectar(self, eventos):
+        """
+        Detecta somente aumento do placar.
 
-    height=200
-)
+        Isso evita alertar quando:
+          - uma API corrige o placar;
+          - uma partida muda de fonte;
+          - o placar inicial já era 1-0;
+          - a mesma atualização é recebida várias vezes.
+        """
 
+        vivos = [
+            ev for ev in eventos
+            if esta_ao_vivo(ev)
+            and placar(ev) is not None
+        ]
 
-# ============================================================
-# BOTÃO
-# ============================================================
+        self.ultima_quantidade_live = len(vivos)
 
-if st.button(
-    "🤖 ANALISAR",
-    type="primary",
-    use_container_width=True
-):
+        for evento in vivos:
 
-    if not OPENROUTER_API_KEY:
+            atual = placar(evento)
 
-        st.error(
-            "Configure OPENROUTER_API_KEY."
+            if atual is None:
+                continue
+
+            chave = chave_base(evento)
+
+            anterior = self.placares.get(chave)
+
+            # Primeiro contato: apenas registra.
+            # Não dispara alerta de gol que ocorreu antes do bot iniciar.
+            if anterior is None:
+                self.placares[chave] = atual
+                continue
+
+            old_total = anterior[0] + anterior[1]
+            new_total = atual[0] + atual[1]
+
+            # Nenhum gol novo.
+            if new_total <= old_total:
+                self.placares[chave] = atual
+                continue
+
+            # Garante que só notificamos cada mudança de placar uma vez.
+            assinatura = (
+                chave,
+                atual[0],
+                atual[1],
+            )
+
+            self.placares[chave] = atual
+
+            if assinatura in self.gols_notificados:
+                continue
+
+            texto = mensagem_gol(
+                evento,
+                anterior,
+                atual
+            )
+
+            if texto:
+                self.gols_notificados.add(assinatura)
+                self.notificar(texto)
+
+        # Limpa partidas antigas do dicionário para não crescer
+        # indefinidamente durante vários dias de execução.
+        chaves_vivas = {
+            chave_base(ev)
+            for ev in vivos
+        }
+
+        antigas = [
+            chave
+            for chave in self.placares
+            if chave not in chaves_vivas
+        ]
+
+        for chave in antigas:
+            self.placares.pop(chave, None)
+
+    def ciclo(self):
+        inicio = time.monotonic()
+
+        eventos = carregar_eventos_rapido()
+
+        self.detectar(eventos)
+
+        duracao = time.monotonic() - inicio
+
+        return len(eventos), duracao
+
+    def iniciar(self):
+        self.running = True
+
+        print("=" * 60)
+        print("⚽ BOT DE GOLS — MONITORAMENTO RÁPIDO")
+        print("=" * 60)
+        print(f"Intervalo: {POLL_INTERVAL:.1f}s")
+        print(f"Timeout API: {FAST_TIMEOUT:.1f}s")
+        print(
+            "Telegram:",
+            "CONFIGURADO" if telegram_configurado()
+            else "não configurado"
         )
+        print("=" * 60)
 
-        st.stop()
+        # Carrega o placar inicial antes de começar a detectar.
+        # Assim o bot não dispara falsos gols ao iniciar.
+        primeiro = True
 
+        while self.running:
 
-    with st.spinner(
-        "🤖 IA analisando..."
-    ):
+            try:
+                self.ciclos += 1
 
-        resultado = consultar_ia(
-            pergunta
-        )
+                quantidade, duracao = self.ciclo()
 
+                agora = datetime.now(BRT).strftime(
+                    "%H:%M:%S"
+                )
 
-    st.divider()
+                print(
+                    f"[{agora}] "
+                    f"ciclo={self.ciclos} | "
+                    f"eventos={quantidade} | "
+                    f"ao vivo={self.ultima_quantidade_live} | "
+                    f"tempo={duracao:.2f}s"
+                )
 
+                # Se o ciclo demorou mais que o intervalo,
+                # inicia o próximo imediatamente.
+                espera = max(
+                    0.1,
+                    POLL_INTERVAL - duracao
+                )
 
-    if resultado["ok"]:
+                time.sleep(espera)
 
-        st.markdown(
-            "## 🏆 RESULTADO"
-        )
+            except KeyboardInterrupt:
+                print("\nBot encerrado pelo usuário.")
+                self.running = False
 
-        st.markdown(
-            resultado["texto"]
-        )
+            except Exception as exc:
+                print(
+                    f"[ERRO MONITOR] {type(exc).__name__}: {exc}"
+                )
+                time.sleep(1)
 
-    else:
-
-        st.error(
-            resultado["texto"]
-        )
+    def parar(self):
+        self.running = False
 
 
 # ============================================================
-# RODAPÉ
+# EXECUÇÃO
 # ============================================================
 
-st.divider()
+if __name__ == "__main__":
 
-st.caption(
-    "⚠️ Probabilidades são estimativas e não garantem "
-    "resultados."
-)
+    bot = MonitorGols()
+
+    try:
+        bot.iniciar()
+
+    except KeyboardInterrupt:
+        bot.parar()
+        print("Encerrado.")
