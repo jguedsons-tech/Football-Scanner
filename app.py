@@ -1,10 +1,12 @@
 import os
+import re
 import time
+import unicodedata
+import threading
+from datetime import datetime, timezone
+
 import requests
 import streamlit as st
-
-from datetime import datetime
-from zoneinfo import ZoneInfo
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 
@@ -13,224 +15,384 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 # ============================================================
 
 st.set_page_config(
-    page_title="Football Multi-Source Scanner",
+    page_title="Football Goal Race",
     page_icon="⚽",
-    layout="wide"
+    layout="wide",
 )
 
-BRT = ZoneInfo("America/Sao_Paulo")
+# ------------------------------------------------------------
+# CHAVES
+# ------------------------------------------------------------
+# IMPORTANTE:
+# Em produção, prefira colocar essas chaves no Streamlit Secrets.
+#
+# Exemplo:
+#
+# [api]
+# football_data = "..."
+# fivedollar = "..."
+# thesportsdb = "123"
+# openfoot = "..."
+# openrouter = "..."
+#
+# [telegram]
+# bot_token = "..."
+# chat_id = "..."
+#
+# O código abaixo aceita também variáveis de ambiente.
 
-TIMEOUT = 5
-MAX_WORKERS = 12
+FOOTBALL_DATA_API_TOKEN = os.getenv(
+    "FOOTBALL_DATA_API_TOKEN",
+    ""
+)
 
-ESPN_BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
-FOOTBALL_DATA_BASE = "https://api.football-data.org/v4"
-API_FOOTBALL_BASE = "https://v3.football.api-sports.io"
-THESPORTSDB_BASE = "https://www.thesportsdb.com/api/v1/json"
+FIVEDOLLAR_FOOTBALL_API_KEY = os.getenv(
+    "FIVEDOLLAR_FOOTBALL_API_KEY",
+    ""
+)
 
-
-# ============================================================
-# SECRETS / VARIÁVEIS
-# ============================================================
-
-def get_secret(nome, default=""):
-    try:
-        valor = st.secrets.get(nome, "")
-        if valor:
-            return str(valor)
-    except Exception:
-        pass
-
-    return os.getenv(nome, default)
-
-
-API_FOOTBALL_KEY = get_secret("API_FOOTBALL_KEY")
-FOOTBALL_DATA_TOKEN = get_secret("FOOTBALL_DATA_TOKEN")
-
-# TheSportsDB:
-# 123 = chave pública de teste da V1.
-# Para livescore V2 é necessária chave Premium.
-THESPORTSDB_KEY = get_secret(
-    "THESPORTSDB_KEY",
+THESPORTSDB_API_KEY = os.getenv(
+    "THESPORTSDB_API_KEY",
     "123"
 )
 
-TELEGRAM_BOT_TOKEN = get_secret("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = get_secret("TELEGRAM_CHAT_ID")
+OPENFOOT_API_KEY = os.getenv(
+    "OPENFOOT_API_KEY",
+    ""
+)
+
+OPENROUTER_API_KEY = os.getenv(
+    "OPENROUTER_API_KEY",
+    ""
+)
+
+OPENROUTER_MODEL = os.getenv(
+    "OPENROUTER_MODEL",
+    "openrouter/free"
+)
+
+TELEGRAM_BOT_TOKEN = os.getenv(
+    "TELEGRAM_BOT_TOKEN",
+    ""
+)
+
+TELEGRAM_CHAT_ID = os.getenv(
+    "TELEGRAM_CHAT_ID",
+    ""
+)
+
+
+# ============================================================
+# TENTAR STREAMLIT SECRETS
+# ============================================================
+
+def secret_value(section, key, default=""):
+    try:
+        if section in st.secrets:
+            value = st.secrets[section].get(key, default)
+            if value:
+                return value
+    except Exception:
+        pass
+
+    return default
+
+
+FOOTBALL_DATA_API_TOKEN = secret_value(
+    "api",
+    "football_data",
+    FOOTBALL_DATA_API_TOKEN
+)
+
+FIVEDOLLAR_FOOTBALL_API_KEY = secret_value(
+    "api",
+    "fivedollar",
+    FIVEDOLLAR_FOOTBALL_API_KEY
+)
+
+THESPORTSDB_API_KEY = secret_value(
+    "api",
+    "thesportsdb",
+    THESPORTSDB_API_KEY
+)
+
+OPENFOOT_API_KEY = secret_value(
+    "api",
+    "openfoot",
+    OPENFOOT_API_KEY
+)
+
+OPENROUTER_API_KEY = secret_value(
+    "api",
+    "openrouter",
+    OPENROUTER_API_KEY
+)
+
+OPENROUTER_MODEL = secret_value(
+    "api",
+    "openrouter_model",
+    OPENROUTER_MODEL
+)
+
+TELEGRAM_BOT_TOKEN = secret_value(
+    "telegram",
+    "bot_token",
+    TELEGRAM_BOT_TOKEN
+)
+
+TELEGRAM_CHAT_ID = secret_value(
+    "telegram",
+    "chat_id",
+    TELEGRAM_CHAT_ID
+)
+
+
+# ============================================================
+# CONSTANTES
+# ============================================================
+
+TIMEOUT = 8
+
+DEFAULT_REFRESH = 5
+
+ESPN_BASE = (
+    "https://site.web.api.espn.com"
+    "/apis/site/v2/sports/soccer"
+)
+
+FIVEDOLLAR_BASE = (
+    "https://api.5dollarfootballapi.com/v1"
+)
+
+OPENFOOT_BASE = (
+    "https://openfootapi.com/v1"
+)
+
+FOOTBALL_DATA_BASE = (
+    "https://api.football-data.org/v4"
+)
+
+THESPORTSDB_BASE = (
+    "https://www.thesportsdb.com/api/v2/json"
+)
 
 
 # ============================================================
 # LIGAS ESPN
 # ============================================================
 
-LIGAS_ESPN = {
+ESPN_LEAGUES = {
     "Brasil Série A": "bra.1",
     "Brasil Série B": "bra.2",
-    "Brasil Série C": "bra.3",
-    "Brasil Série D": "bra.4",
-
     "Inglaterra Premier League": "eng.1",
-    "Inglaterra Championship": "eng.2",
-
     "Espanha LaLiga": "esp.1",
-    "Espanha Segunda": "esp.2",
-
     "Itália Serie A": "ita.1",
-    "Itália Serie B": "ita.2",
-
     "Alemanha Bundesliga": "ger.1",
-    "Alemanha 2. Bundesliga": "ger.2",
-
     "França Ligue 1": "fra.1",
-    "França Ligue 2": "fra.2",
-
-    "Portugal": "por.1",
-    "Holanda": "ned.1",
-    "Bélgica": "bel.1",
-    "Turquia": "tur.1",
-    "Grécia": "gre.1",
-    "Escócia": "sco.1",
-
     "Argentina": "arg.1",
+    "México Liga MX": "mex.1",
     "Colômbia": "col.1",
     "Chile": "chi.1",
-    "Paraguai": "par.1",
-    "Uruguai": "uru.1",
-    "Peru": "per.1",
-    "Equador": "ecu.1",
-    "Bolívia": "bol.1",
-    "México": "mex.1",
-
-    "MLS": "usa.1",
-
-    "Japão": "jpn.1",
-    "Coreia do Sul": "kor.1",
-    "Austrália": "aus.1",
-
-    "Áustria": "aut.1",
-    "Suíça": "sui.1",
-    "Noruega": "nor.1",
-    "Suécia": "swe.1",
-    "Dinamarca": "den.1",
-    "Polônia": "pol.1",
+    "Portugal": "por.1",
+    "Holanda Eredivisie": "ned.1",
+    "Turquia": "tur.1",
+    "Estados Unidos MLS": "usa.1",
 }
 
 
 # ============================================================
-# FOOTBALL-DATA.ORG
+# ESTADO
 # ============================================================
 
-FOOTBALL_DATA_COMPETITIONS = {
-    "Premier League": "PL",
-    "Championship": "ELC",
-    "Bundesliga": "BL1",
-    "LaLiga": "PD",
-    "Serie A": "SA",
-    "Ligue 1": "FL1",
-    "Primeira Liga": "PPL",
-    "Eredivisie": "DED",
-    "Brasileirão": "BSA",
-}
+if "score_state" not in st.session_state:
+    st.session_state.score_state = {}
 
+if "initialized" not in st.session_state:
+    st.session_state.initialized = False
 
-# ============================================================
-# API-FOOTBALL
-# IDs MAIS USADOS
-# ============================================================
+if "goal_history" not in st.session_state:
+    st.session_state.goal_history = []
 
-API_FOOTBALL_LEAGUES = {
-    "Premier League": 39,
-    "Championship": 40,
-    "LaLiga": 140,
-    "Serie A": 135,
-    "Bundesliga": 78,
-    "Ligue 1": 61,
-    "Primeira Liga": 94,
-    "Eredivisie": 88,
-    "Brasileirão": 71,
-    "Argentina": 128,
-    "Colômbia": 239,
-    "Chile": 265,
-    "Paraguai": 250,
-    "Uruguai": 268,
-    "Peru": 281,
-    "Equador": 242,
-    "México": 262,
-    "MLS": 253,
-    "Japão": 98,
-    "Coreia do Sul": 292,
-    "Austrália": 188,
-}
+if "source_stats" not in st.session_state:
+    st.session_state.source_stats = {}
+
+if "espn_block_until" not in st.session_state:
+    st.session_state.espn_block_until = 0.0
+
+if "last_cycle" not in st.session_state:
+    st.session_state.last_cycle = None
+
+if "cycle_count" not in st.session_state:
+    st.session_state.cycle_count = 0
 
 
 # ============================================================
-# UTILIDADES
+# UTILITÁRIOS
 # ============================================================
 
-def agora_brt():
-    return datetime.now(BRT)
+def agora_str():
+    return datetime.now().strftime("%H:%M:%S.%f")[:-3]
 
 
-def horario():
-    return agora_brt().strftime("%H:%M:%S.%f")[:-3]
-
-
-def normalizar_nome(nome):
-    if not nome:
+def normalizar_texto(texto):
+    if not texto:
         return ""
 
+    texto = str(texto)
+
+    texto = unicodedata.normalize(
+        "NFKD",
+        texto
+    ).encode(
+        "ascii",
+        "ignore"
+    ).decode(
+        "ascii"
+    )
+
+    texto = texto.lower()
+
+    texto = re.sub(
+        r"[^a-z0-9]+",
+        " ",
+        texto
+    )
+
+    return " ".join(texto.split())
+
+
+def nome_jogo(home, away):
+    return f"{home} x {away}"
+
+
+def chave_jogo(home, away):
     return (
-        nome.lower()
-        .replace(" fc", "")
-        .replace(" cf", "")
-        .replace(" sc", "")
-        .replace(" ac", "")
-        .replace(".", "")
-        .strip()
+        normalizar_texto(home),
+        normalizar_texto(away)
     )
 
 
-def chave_jogo(casa, fora):
-    return (
-        normalizar_nome(casa),
-        normalizar_nome(fora)
-    )
+def score_valido(home_score, away_score):
+    try:
+        if home_score is None:
+            home_score = 0
+
+        if away_score is None:
+            away_score = 0
+
+        return (
+            int(home_score),
+            int(away_score)
+        )
+    except Exception:
+        return None
 
 
-def criar_jogo(
-    fonte,
-    evento_id,
-    liga,
-    casa,
-    fora,
-    gols_casa,
-    gols_fora,
-    status="",
-    minuto=None
+def status_live(status):
+    if status is None:
+        return True
+
+    s = str(status).upper()
+
+    encerrados = {
+        "FT",
+        "AET",
+        "PEN",
+        "FINISHED",
+        "FINISH",
+        "ENDED",
+        "CANCELLED",
+        "CANCELED",
+        "POSTPONED",
+        "PST",
+    }
+
+    return s not in encerrados
+
+
+def http_get(
+    url,
+    headers=None,
+    params=None,
+    timeout=TIMEOUT
 ):
+    inicio = time.perf_counter()
 
     try:
-        gols_casa = int(gols_casa or 0)
-    except Exception:
-        gols_casa = 0
+        resposta = requests.get(
+            url,
+            headers=headers or {},
+            params=params or {},
+            timeout=timeout
+        )
 
-    try:
-        gols_fora = int(gols_fora or 0)
-    except Exception:
-        gols_fora = 0
+        recebido = time.perf_counter()
+
+        return {
+            "ok": resposta.ok,
+            "status": resposta.status_code,
+            "json": (
+                resposta.json()
+                if resposta.content
+                else {}
+            ),
+            "inicio": inicio,
+            "recebido": recebido,
+            "duracao": recebido - inicio,
+            "erro": None,
+        }
+
+    except Exception as e:
+        recebido = time.perf_counter()
+
+        return {
+            "ok": False,
+            "status": 0,
+            "json": {},
+            "inicio": inicio,
+            "recebido": recebido,
+            "duracao": recebido - inicio,
+            "erro": str(e),
+        }
+
+
+# ============================================================
+# NORMALIZAÇÃO PADRÃO
+# ============================================================
+
+def evento(
+    source,
+    home,
+    away,
+    home_score,
+    away_score,
+    status="LIVE",
+    minute=None,
+    league=None,
+    external_id=None,
+    recebido=None,
+    duracao=None
+):
+    score = score_valido(
+        home_score,
+        away_score
+    )
+
+    if not score:
+        return None
 
     return {
-        "fonte": fonte,
-        "id": str(evento_id),
-        "liga": liga or "",
-        "casa": casa or "Casa",
-        "fora": fora or "Fora",
-        "gols_casa": gols_casa,
-        "gols_fora": gols_fora,
-        "status": status or "",
-        "minuto": minuto,
-        "hora_resposta": horario(),
-        "timestamp_resposta": time.perf_counter(),
+        "source": source,
+        "home": str(home or "").strip(),
+        "away": str(away or "").strip(),
+        "home_score": score[0],
+        "away_score": score[1],
+        "status": status,
+        "minute": minute,
+        "league": league or "",
+        "external_id": external_id,
+        "received_at": recebido,
+        "duration": duracao,
     }
 
 
@@ -238,1280 +400,1860 @@ def criar_jogo(
 # ESPN
 # ============================================================
 
-def consultar_espn(nome_liga, codigo):
+def buscar_espn_league(nome_league, league_code):
+    agora = time.time()
+
+    # Circuit breaker para 403.
+    if agora < st.session_state.espn_block_until:
+        return {
+            "source": "ESPN",
+            "league": nome_league,
+            "events": [],
+            "status": "PAUSADA_APOS_403",
+            "duracao": 0,
+            "recebido": time.perf_counter(),
+        }
+
+    url = (
+        f"{ESPN_BASE}/"
+        f"{league_code}/scoreboard"
+    )
 
     inicio = time.perf_counter()
 
-    url = f"{ESPN_BASE}/{codigo}/scoreboard"
-
     try:
-
-        response = requests.get(
+        # Não utilizar User-Agent de navegador.
+        resposta = requests.get(
             url,
-            timeout=TIMEOUT,
             headers={
-                "User-Agent": "Mozilla/5.0"
-            }
-        )
-
-        duracao = time.perf_counter() - inicio
-
-        if response.status_code != 200:
-            return {
-                "fonte": "ESPN",
-                "eventos": [],
-                "erro": f"HTTP {response.status_code}",
-                "tempo": duracao
-            }
-
-        data = response.json()
-
-        jogos = []
-
-        for evento in data.get("events", []):
-
-            try:
-
-                competicao = evento.get(
-                    "competitions",
-                    [{}]
-                )[0]
-
-                equipes = competicao.get(
-                    "competitors",
-                    []
-                )
-
-                casa = None
-                fora = None
-
-                for equipe in equipes:
-
-                    if equipe.get("homeAway") == "home":
-                        casa = equipe
-
-                    elif equipe.get("homeAway") == "away":
-                        fora = equipe
-
-                if not casa or not fora:
-                    continue
-
-                status_obj = competicao.get(
-                    "status",
-                    {}
-                )
-
-                status_type = status_obj.get(
-                    "type",
-                    {}
-                )
-
-                estado = status_type.get(
-                    "state",
-                    ""
-                )
-
-                status = status_type.get(
-                    "shortDetail",
-                    status_type.get(
-                        "description",
-                        ""
-                    )
-                )
-
-                minuto = status_obj.get(
-                    "displayClock"
-                )
-
-                jogo = criar_jogo(
-                    fonte="ESPN",
-                    evento_id=evento.get("id"),
-                    liga=nome_liga,
-                    casa=casa.get(
-                        "team",
-                        {}
-                    ).get(
-                        "displayName",
-                        "Casa"
-                    ),
-                    fora=fora.get(
-                        "team",
-                        {}
-                    ).get(
-                        "displayName",
-                        "Fora"
-                    ),
-                    gols_casa=casa.get(
-                        "score",
-                        0
-                    ),
-                    gols_fora=fora.get(
-                        "score",
-                        0
-                    ),
-                    status=status,
-                    minuto=minuto
-                )
-
-                jogo["ao_vivo"] = (
-                    estado == "in"
-                )
-
-                jogos.append(jogo)
-
-            except Exception:
-                continue
-
-        return {
-            "fonte": "ESPN",
-            "eventos": jogos,
-            "erro": None,
-            "tempo": duracao
-        }
-
-    except Exception as e:
-
-        return {
-            "fonte": "ESPN",
-            "eventos": [],
-            "erro": str(e),
-            "tempo": time.perf_counter() - inicio
-        }
-
-
-# ============================================================
-# API-FOOTBALL
-# ============================================================
-
-def consultar_api_football():
-
-    inicio = time.perf_counter()
-
-    if not API_FOOTBALL_KEY:
-
-        return {
-            "fonte": "API-Football",
-            "eventos": [],
-            "erro": "API_FOOTBALL_KEY não configurada",
-            "tempo": 0
-        }
-
-    try:
-
-        response = requests.get(
-            f"{API_FOOTBALL_BASE}/fixtures",
-            params={
-                "live": "all"
-            },
-            headers={
-                "x-apisports-key": API_FOOTBALL_KEY
+                "Accept": "application/json",
+                "Accept-Encoding": "gzip, deflate",
+                "Connection": "keep-alive",
             },
             timeout=TIMEOUT
         )
 
-        duracao = time.perf_counter() - inicio
+        recebido = time.perf_counter()
+        duracao = recebido - inicio
 
-        if response.status_code != 200:
+        if resposta.status_code == 403:
+            # Pausa por 2 minutos para não martelar
+            # a API com vários 403.
+            st.session_state.espn_block_until = (
+                time.time() + 120
+            )
 
             return {
-                "fonte": "API-Football",
-                "eventos": [],
-                "erro": f"HTTP {response.status_code}",
-                "tempo": duracao
+                "source": "ESPN",
+                "league": nome_league,
+                "events": [],
+                "status": "403_PAUSADA_120S",
+                "duracao": duracao,
+                "recebido": recebido,
             }
 
-        data = response.json()
+        if not resposta.ok:
+            return {
+                "source": "ESPN",
+                "league": nome_league,
+                "events": [],
+                "status": f"HTTP_{resposta.status_code}",
+                "duracao": duracao,
+                "recebido": recebido,
+            }
 
-        jogos = []
+        data = resposta.json()
 
-        for item in data.get(
-            "response",
-            []
-        ):
+        eventos = []
 
+        for item in data.get("events", []):
             try:
+                comp = item.get(
+                    "competitions",
+                    [{}]
+                )[0]
 
-                fixture = item.get(
-                    "fixture",
-                    {}
+                competitors = comp.get(
+                    "competitors",
+                    []
                 )
 
-                teams = item.get(
-                    "teams",
-                    {}
+                home = None
+                away = None
+
+                for c in competitors:
+                    if c.get("homeAway") == "home":
+                        home = c
+                    elif c.get("homeAway") == "away":
+                        away = c
+
+                if not home or not away:
+                    continue
+
+                home_name = (
+                    home.get("team", {})
+                    .get("displayName")
+                    or home.get("team", {})
+                    .get("name")
                 )
 
-                goals = item.get(
-                    "goals",
-                    {}
+                away_name = (
+                    away.get("team", {})
+                    .get("displayName")
+                    or away.get("team", {})
+                    .get("name")
                 )
 
-                league = item.get(
-                    "league",
-                    {}
-                )
+                hs = home.get("score", 0)
+                aws = away.get("score", 0)
 
-                status = fixture.get(
+                status_obj = item.get(
                     "status",
                     {}
                 )
 
-                jogo = criar_jogo(
-                    fonte="API-Football",
-                    evento_id=fixture.get(
-                        "id"
-                    ),
-                    liga=league.get(
-                        "name",
-                        ""
-                    ),
-                    casa=teams.get(
-                        "home",
-                        {}
-                    ).get(
-                        "name",
-                        "Casa"
-                    ),
-                    fora=teams.get(
-                        "away",
-                        {}
-                    ).get(
-                        "name",
-                        "Fora"
-                    ),
-                    gols_casa=goals.get(
-                        "home",
-                        0
-                    ),
-                    gols_fora=goals.get(
-                        "away",
-                        0
-                    ),
-                    status=status.get(
-                        "long",
-                        ""
-                    ),
-                    minuto=status.get(
-                        "elapsed"
-                    )
+                status_type = (
+                    status_obj
+                    .get("type", {})
+                    .get("shortDetail")
+                    or status_obj
+                    .get("type", {})
+                    .get("name")
+                    or "LIVE"
                 )
 
-                jogo["ao_vivo"] = True
+                minuto = (
+                    status_obj
+                    .get("displayClock")
+                )
 
-                jogos.append(jogo)
+                ev = evento(
+                    "ESPN",
+                    home_name,
+                    away_name,
+                    hs,
+                    aws,
+                    status=status_type,
+                    minute=minuto,
+                    league=nome_league,
+                    external_id=item.get("id"),
+                    recebido=recebido,
+                    duracao=duracao
+                )
+
+                if ev and status_live(status_type):
+                    eventos.append(ev)
 
             except Exception:
                 continue
 
         return {
-            "fonte": "API-Football",
-            "eventos": jogos,
-            "erro": None,
-            "tempo": duracao
+            "source": "ESPN",
+            "league": nome_league,
+            "events": eventos,
+            "status": "OK",
+            "duracao": duracao,
+            "recebido": recebido,
         }
 
     except Exception as e:
+        recebido = time.perf_counter()
 
         return {
-            "fonte": "API-Football",
-            "eventos": [],
-            "erro": str(e),
-            "tempo": time.perf_counter() - inicio
+            "source": "ESPN",
+            "league": nome_league,
+            "events": [],
+            "status": f"ERRO: {str(e)[:80]}",
+            "duracao": recebido - inicio,
+            "recebido": recebido,
         }
+
+
+def buscar_espn():
+    resultados = []
+
+    # Se ESPN estiver temporariamente bloqueada,
+    # não faz várias chamadas inúteis.
+    if time.time() < st.session_state.espn_block_until:
+        return [{
+            "source": "ESPN",
+            "league": "Todas",
+            "events": [],
+            "status": "PAUSADA_APOS_403",
+            "duracao": 0,
+            "recebido": time.perf_counter(),
+        }]
+
+    with ThreadPoolExecutor(
+        max_workers=min(8, len(ESPN_LEAGUES))
+    ) as executor:
+
+        futures = {
+            executor.submit(
+                buscar_espn_league,
+                nome,
+                codigo
+            ): nome
+            for nome, codigo in ESPN_LEAGUES.items()
+        }
+
+        for future in as_completed(futures):
+            try:
+                resultados.append(
+                    future.result()
+                )
+            except Exception as e:
+                resultados.append({
+                    "source": "ESPN",
+                    "league": futures[future],
+                    "events": [],
+                    "status": f"ERRO: {e}",
+                    "duracao": 0,
+                    "recebido": time.perf_counter(),
+                })
+
+    return resultados
+
+
+# ============================================================
+# FIVE DOLLAR FOOTBALL
+# ============================================================
+
+def buscar_fivedollar():
+    if not FIVEDOLLAR_FOOTBALL_API_KEY:
+        return {
+            "source": "FiveDollar",
+            "events": [],
+            "status": "SEM_CHAVE",
+            "duracao": 0,
+            "recebido": time.perf_counter(),
+        }
+
+    url = (
+        f"{FIVEDOLLAR_BASE}/fixtures"
+    )
+
+    headers = {
+        "Authorization":
+            f"Bearer {FIVEDOLLAR_FOOTBALL_API_KEY}",
+        "Accept": "application/json",
+    }
+
+    r = http_get(
+        url,
+        headers=headers,
+        params={
+            "status": "live",
+            "per_page": 500,
+        }
+    )
+
+    if not r["ok"]:
+        return {
+            "source": "FiveDollar",
+            "events": [],
+            "status": (
+                f"HTTP_{r['status']}"
+                if r["status"]
+                else f"ERRO_{r['erro']}"
+            ),
+            "duracao": r["duracao"],
+            "recebido": r["recebido"],
+        }
+
+    data = r["json"]
+
+    rows = data.get("data", [])
+
+    eventos = []
+
+    for item in rows:
+        try:
+            teams = item.get(
+                "teams",
+                {}
+            )
+
+            home = (
+                teams.get("home", {})
+                .get("name")
+            )
+
+            away = (
+                teams.get("away", {})
+                .get("name")
+            )
+
+            goals = item.get(
+                "goals",
+                {}
+            )
+
+            hs = goals.get("home")
+            aws = goals.get("away")
+
+            ev = evento(
+                "FiveDollar",
+                home,
+                away,
+                hs,
+                aws,
+                status=item.get("status"),
+                league=(
+                    item.get("league", {})
+                    .get("name")
+                ),
+                external_id=item.get("id"),
+                recebido=r["recebido"],
+                duracao=r["duracao"]
+            )
+
+            if ev:
+                eventos.append(ev)
+
+        except Exception:
+            continue
+
+    return {
+        "source": "FiveDollar",
+        "events": eventos,
+        "status": "OK",
+        "duracao": r["duracao"],
+        "recebido": r["recebido"],
+    }
+
+
+# ============================================================
+# OPENFOOT
+# ============================================================
+
+def buscar_openfoot():
+    if not OPENFOOT_API_KEY:
+        return {
+            "source": "OpenFoot",
+            "events": [],
+            "status": "SEM_CHAVE",
+            "duracao": 0,
+            "recebido": time.perf_counter(),
+        }
+
+    url = (
+        f"{OPENFOOT_BASE}/matches"
+    )
+
+    headers = {
+        "Authorization":
+            f"Bearer {OPENFOOT_API_KEY}",
+        "Accept": "application/json",
+    }
+
+    r = http_get(
+        url,
+        headers=headers,
+        params={
+            "status": "live",
+        }
+    )
+
+    if not r["ok"]:
+        return {
+            "source": "OpenFoot",
+            "events": [],
+            "status": (
+                f"HTTP_{r['status']}"
+                if r["status"]
+                else f"ERRO_{r['erro']}"
+            ),
+            "duracao": r["duracao"],
+            "recebido": r["recebido"],
+        }
+
+    data = r["json"]
+
+    rows = data.get("data", [])
+
+    eventos = []
+
+    for item in rows:
+        try:
+            home = (
+                item.get("homeTeam", {})
+                .get("name")
+            )
+
+            away = (
+                item.get("awayTeam", {})
+                .get("name")
+            )
+
+            # O contrato do OpenFoot pode apresentar
+            # placares em diferentes objetos conforme o
+            # endpoint/plano.
+            score = (
+                item.get("score")
+                or item.get("scores")
+                or {}
+            )
+
+            hs = (
+                score.get("home")
+                if isinstance(score, dict)
+                else None
+            )
+
+            aws = (
+                score.get("away")
+                if isinstance(score, dict)
+                else None
+            )
+
+            if hs is None:
+                hs = (
+                    item.get("homeScore")
+                    or item.get("homeGoals")
+                )
+
+            if aws is None:
+                aws = (
+                    item.get("awayScore")
+                    or item.get("awayGoals")
+                )
+
+            ev = evento(
+                "OpenFoot",
+                home,
+                away,
+                hs,
+                aws,
+                status=item.get("status"),
+                minute=item.get("minute"),
+                league=(
+                    item.get("competition", {})
+                    .get("name")
+                    if isinstance(
+                        item.get("competition"),
+                        dict
+                    )
+                    else ""
+                ),
+                external_id=item.get("id"),
+                recebido=r["recebido"],
+                duracao=r["duracao"]
+            )
+
+            if ev:
+                eventos.append(ev)
+
+        except Exception:
+            continue
+
+    return {
+        "source": "OpenFoot",
+        "events": eventos,
+        "status": "OK",
+        "duracao": r["duracao"],
+        "recebido": r["recebido"],
+    }
 
 
 # ============================================================
 # FOOTBALL-DATA.ORG
 # ============================================================
 
-def consultar_football_data():
-
-    inicio = time.perf_counter()
-
-    if not FOOTBALL_DATA_TOKEN:
-
+def buscar_football_data():
+    if not FOOTBALL_DATA_API_TOKEN:
         return {
-            "fonte": "football-data.org",
-            "eventos": [],
-            "erro": "FOOTBALL_DATA_TOKEN não configurado",
-            "tempo": 0
+            "source": "FootballData",
+            "events": [],
+            "status": "SEM_TOKEN",
+            "duracao": 0,
+            "recebido": time.perf_counter(),
         }
 
-    try:
+    url = (
+        f"{FOOTBALL_DATA_BASE}/matches"
+    )
 
-        response = requests.get(
-            f"{FOOTBALL_DATA_BASE}/matches",
-            params={
-                "status": "IN_PLAY"
-            },
-            headers={
-                "X-Auth-Token": FOOTBALL_DATA_TOKEN
-            },
-            timeout=TIMEOUT
-        )
+    headers = {
+        "X-Auth-Token":
+            FOOTBALL_DATA_API_TOKEN,
+        "Accept": "application/json",
+    }
 
-        duracao = time.perf_counter() - inicio
+    r = http_get(
+        url,
+        headers=headers,
+        params={
+            "status": "IN_PLAY"
+        }
+    )
 
-        if response.status_code != 200:
-
-            return {
-                "fonte": "football-data.org",
-                "eventos": [],
-                "erro": f"HTTP {response.status_code}",
-                "tempo": duracao
-            }
-
-        data = response.json()
-
-        jogos = []
-
-        for item in data.get(
-            "matches",
-            []
-        ):
-
-            try:
-
-                score = item.get(
-                    "score",
-                    {}
-                )
-
-                fulltime = score.get(
-                    "fullTime",
-                    {}
-                )
-
-                jogo = criar_jogo(
-                    fonte="football-data.org",
-                    evento_id=item.get(
-                        "id"
-                    ),
-                    liga=item.get(
-                        "competition",
-                        {}
-                    ).get(
-                        "name",
-                        ""
-                    ),
-                    casa=item.get(
-                        "homeTeam",
-                        {}
-                    ).get(
-                        "name",
-                        "Casa"
-                    ),
-                    fora=item.get(
-                        "awayTeam",
-                        {}
-                    ).get(
-                        "name",
-                        "Fora"
-                    ),
-                    gols_casa=fulltime.get(
-                        "home",
-                        0
-                    ),
-                    gols_fora=fulltime.get(
-                        "away",
-                        0
-                    ),
-                    status=item.get(
-                        "status",
-                        ""
-                    ),
-                    minuto=None
-                )
-
-                jogo["ao_vivo"] = (
-                    item.get("status")
-                    in [
-                        "IN_PLAY",
-                        "PAUSED"
-                    ]
-                )
-
-                jogos.append(jogo)
-
-            except Exception:
-                continue
-
+    if not r["ok"]:
         return {
-            "fonte": "football-data.org",
-            "eventos": jogos,
-            "erro": None,
-            "tempo": duracao
+            "source": "FootballData",
+            "events": [],
+            "status": (
+                f"HTTP_{r['status']}"
+                if r["status"]
+                else f"ERRO_{r['erro']}"
+            ),
+            "duracao": r["duracao"],
+            "recebido": r["recebido"],
         }
 
-    except Exception as e:
+    data = r["json"]
 
-        return {
-            "fonte": "football-data.org",
-            "eventos": [],
-            "erro": str(e),
-            "tempo": time.perf_counter() - inicio
-        }
+    rows = data.get(
+        "matches",
+        []
+    )
+
+    eventos = []
+
+    for item in rows:
+        try:
+            home = (
+                item.get("homeTeam", {})
+                .get("name")
+            )
+
+            away = (
+                item.get("awayTeam", {})
+                .get("name")
+            )
+
+            score = item.get(
+                "score",
+                {}
+            )
+
+            full = score.get(
+                "fullTime",
+                {}
+            )
+
+            hs = full.get("home")
+            aws = full.get("away")
+
+            # Algumas respostas podem fornecer
+            # halfTime enquanto fullTime ainda não
+            # estiver atualizado.
+            if hs is None:
+                hs = score.get("halfTime", {}).get("home")
+
+            if aws is None:
+                aws = score.get("halfTime", {}).get("away")
+
+            ev = evento(
+                "FootballData",
+                home,
+                away,
+                hs,
+                aws,
+                status=item.get("status"),
+                minute=item.get("minute"),
+                league=(
+                    item.get("competition", {})
+                    .get("name")
+                ),
+                external_id=item.get("id"),
+                recebido=r["recebido"],
+                duracao=r["duracao"]
+            )
+
+            if ev:
+                eventos.append(ev)
+
+        except Exception:
+            continue
+
+    return {
+        "source": "FootballData",
+        "events": eventos,
+        "status": "OK",
+        "duracao": r["duracao"],
+        "recebido": r["recebido"],
+    }
 
 
 # ============================================================
 # THESPORTSDB
 # ============================================================
 
-def consultar_thesportsdb():
-
-    inicio = time.perf_counter()
-
-    # Livescore real da V2 requer chave Premium.
-    # Se uma chave Premium estiver configurada,
-    # utilizamos o endpoint V2.
-
-    if not THESPORTSDB_KEY:
-
+def buscar_thesportsdb():
+    if not THESPORTSDB_API_KEY:
         return {
-            "fonte": "TheSportsDB",
-            "eventos": [],
-            "erro": "THESPORTSDB_KEY não configurada",
-            "tempo": 0
+            "source": "TheSportsDB",
+            "events": [],
+            "status": "SEM_CHAVE",
+            "duracao": 0,
+            "recebido": time.perf_counter(),
         }
+
+    url = (
+        f"{THESPORTSDB_BASE}/"
+        f"livescore/soccer"
+    )
+
+    headers = {
+        "X-API-KEY":
+            THESPORTSDB_API_KEY,
+        "Accept": "application/json",
+    }
+
+    r = http_get(
+        url,
+        headers=headers
+    )
+
+    if not r["ok"]:
+        return {
+            "source": "TheSportsDB",
+            "events": [],
+            "status": (
+                f"HTTP_{r['status']}"
+                if r["status"]
+                else f"ERRO_{r['erro']}"
+            ),
+            "duracao": r["duracao"],
+            "recebido": r["recebido"],
+        }
+
+    data = r["json"]
+
+    # Diferentes versões podem devolver
+    # livescore ou livescores.
+    rows = (
+        data.get("livescore")
+        or data.get("livescores")
+        or data.get("data")
+        or []
+    )
+
+    if isinstance(rows, dict):
+        rows = [rows]
+
+    eventos = []
+
+    for item in rows:
+        try:
+            home = (
+                item.get("strHomeTeam")
+                or item.get("homeTeam")
+                or item.get("home")
+            )
+
+            away = (
+                item.get("strAwayTeam")
+                or item.get("awayTeam")
+                or item.get("away")
+            )
+
+            hs = (
+                item.get("intHomeScore")
+                or item.get("homeScore")
+            )
+
+            aws = (
+                item.get("intAwayScore")
+                or item.get("awayScore")
+            )
+
+            ev = evento(
+                "TheSportsDB",
+                home,
+                away,
+                hs,
+                aws,
+                status=item.get("strStatus"),
+                minute=item.get("strProgress"),
+                league=(
+                    item.get("strLeague")
+                    or item.get("league")
+                    or ""
+                ),
+                external_id=(
+                    item.get("idEvent")
+                    or item.get("eventId")
+                ),
+                recebido=r["recebido"],
+                duracao=r["duracao"]
+            )
+
+            if ev:
+                eventos.append(ev)
+
+        except Exception:
+            continue
+
+    return {
+        "source": "TheSportsDB",
+        "events": eventos,
+        "status": "OK",
+        "duracao": r["duracao"],
+        "recebido": r["recebido"],
+    }
+
+
+# ============================================================
+# OPENROUTER
+# ============================================================
+
+def analisar_gol_openrouter(
+    jogo,
+    placar_anterior,
+    placar_novo,
+    fonte
+):
+    if not OPENROUTER_API_KEY:
+        return "OpenRouter desativado: chave não configurada."
+
+    url = (
+        "https://openrouter.ai/api/v1/chat/completions"
+    )
+
+    headers = {
+        "Authorization":
+            f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+        "HTTP-Referer":
+            "https://football-scanner.streamlit.app",
+        "X-Title":
+            "Football Goal Race",
+    }
+
+    prompt = f"""
+Você é um analista de futebol.
+
+Foi detectada uma mudança de placar ao vivo.
+
+Jogo: {jogo}
+Placar anterior: {placar_anterior}
+Novo placar: {placar_novo}
+Primeira fonte que reportou: {fonte}
+
+Faça uma análise MUITO curta, sem inventar estatísticas.
+
+Responda exatamente em 3 linhas:
+
+EVENTO: descreva a mudança do placar.
+LEITURA: explique somente o que pode ser concluído do placar.
+ATENÇÃO: diga que um placar confirmado por uma API não garante atraso ou vantagem de aposta.
+"""
+
+    payload = {
+        "model": OPENROUTER_MODEL,
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        "temperature": 0.1,
+        "max_tokens": 180,
+    }
 
     try:
-
-        if THESPORTSDB_KEY != "123":
-
-            url = (
-                "https://www.thesportsdb.com/"
-                "api/v2/json/livescore/soccer"
-            )
-
-            response = requests.get(
-                url,
-                headers={
-                    "X-API-KEY": THESPORTSDB_KEY
-                },
-                timeout=TIMEOUT
-            )
-
-        else:
-
-            # A chave 123 é útil para testes da V1,
-            # mas não é equivalente ao livescore Premium.
-
-            return {
-                "fonte": "TheSportsDB",
-                "eventos": [],
-                "erro": (
-                    "Livescore requer chave Premium "
-                    "THESPORTSDB_KEY"
-                ),
-                "tempo": 0
-            }
-
-        duracao = time.perf_counter() - inicio
-
-        if response.status_code != 200:
-
-            return {
-                "fonte": "TheSportsDB",
-                "eventos": [],
-                "erro": f"HTTP {response.status_code}",
-                "tempo": duracao
-            }
-
-        data = response.json()
-
-        # A estrutura pode variar conforme versão/plano.
-        lista = (
-            data.get("livescores")
-            or data.get("events")
-            or data.get("data")
-            or []
+        r = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=15
         )
 
-        jogos = []
+        if not r.ok:
+            return (
+                f"OpenRouter HTTP {r.status_code}: "
+                f"{r.text[:150]}"
+            )
 
-        for item in lista:
+        data = r.json()
 
-            try:
-
-                jogo = criar_jogo(
-                    fonte="TheSportsDB",
-                    evento_id=(
-                        item.get("idEvent")
-                        or item.get("idLiveScore")
-                        or item.get("id")
-                    ),
-                    liga=(
-                        item.get("strLeague")
-                        or item.get("league")
-                        or ""
-                    ),
-                    casa=(
-                        item.get("strHomeTeam")
-                        or item.get("homeTeam")
-                        or "Casa"
-                    ),
-                    fora=(
-                        item.get("strAwayTeam")
-                        or item.get("awayTeam")
-                        or "Fora"
-                    ),
-                    gols_casa=(
-                        item.get("intHomeScore")
-                        or item.get("homeScore")
-                        or 0
-                    ),
-                    gols_fora=(
-                        item.get("intAwayScore")
-                        or item.get("awayScore")
-                        or 0
-                    ),
-                    status=(
-                        item.get("strStatus")
-                        or item.get("status")
-                        or ""
-                    ),
-                    minuto=(
-                        item.get("intProgress")
-                        or item.get("strProgress")
-                    )
-                )
-
-                jogo["ao_vivo"] = True
-
-                jogos.append(jogo)
-
-            except Exception:
-                continue
-
-        return {
-            "fonte": "TheSportsDB",
-            "eventos": jogos,
-            "erro": None,
-            "tempo": duracao
-        }
+        return (
+            data.get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+            .strip()
+        )
 
     except Exception as e:
-
-        return {
-            "fonte": "TheSportsDB",
-            "eventos": [],
-            "erro": str(e),
-            "tempo": time.perf_counter() - inicio
-        }
-
-
-# ============================================================
-# EXECUTAR TODAS AS FONTES EM PARALELO
-# ============================================================
-
-def consultar_todas_as_fontes(
-    ligas_selecionadas
-):
-
-    inicio = time.perf_counter()
-
-    tarefas = []
-
-    # --------------------------------------------------------
-    # ESPN
-    # --------------------------------------------------------
-
-    for nome_liga in ligas_selecionadas:
-
-        codigo = LIGAS_ESPN.get(
-            nome_liga
-        )
-
-        if codigo:
-
-            tarefas.append(
-                (
-                    f"ESPN - {nome_liga}",
-                    consultar_espn,
-                    (
-                        nome_liga,
-                        codigo
-                    )
-                )
-            )
-
-    # --------------------------------------------------------
-    # API-FOOTBALL
-    # --------------------------------------------------------
-
-    tarefas.append(
-        (
-            "API-Football",
-            consultar_api_football,
-            ()
-        )
-    )
-
-    # --------------------------------------------------------
-    # FOOTBALL-DATA
-    # --------------------------------------------------------
-
-    tarefas.append(
-        (
-            "football-data.org",
-            consultar_football_data,
-            ()
-        )
-    )
-
-    # --------------------------------------------------------
-    # THESPORTSDB
-    # --------------------------------------------------------
-
-    tarefas.append(
-        (
-            "TheSportsDB",
-            consultar_thesportsdb,
-            ()
-        )
-    )
-
-    resultados = []
-
-    workers = min(
-        MAX_WORKERS,
-        len(tarefas)
-    )
-
-    with ThreadPoolExecutor(
-        max_workers=workers
-    ) as executor:
-
-        futuros = {}
-
-        for nome, funcao, args in tarefas:
-
-            futuro = executor.submit(
-                funcao,
-                *args
-            )
-
-            futuros[futuro] = nome
-
-        for futuro in as_completed(
-            futuros
-        ):
-
-            nome = futuros[futuro]
-
-            try:
-
-                resultado = futuro.result()
-
-                resultados.append(
-                    resultado
-                )
-
-            except Exception as e:
-
-                resultados.append({
-                    "fonte": nome,
-                    "eventos": [],
-                    "erro": str(e),
-                    "tempo": 0
-                })
-
-    duracao = time.perf_counter() - inicio
-
-    return resultados, duracao
-
-
-# ============================================================
-# AGRUPAMENTO DAS PARTIDAS
-# ============================================================
-
-def agrupar_partidas(resultados):
-
-    grupos = {}
-
-    for resultado in resultados:
-
-        for jogo in resultado.get(
-            "eventos",
-            []
-        ):
-
-            chave = chave_jogo(
-                jogo["casa"],
-                jogo["fora"]
-            )
-
-            if chave not in grupos:
-                grupos[chave] = []
-
-            grupos[chave].append(
-                jogo
-            )
-
-    return grupos
-
-
-# ============================================================
-# DETECÇÃO MULTIFONTE
-# ============================================================
-
-def detectar_gols_multifonte(
-    grupos
-):
-
-    if "placares_multifonte" not in st.session_state:
-        st.session_state.placares_multifonte = {}
-
-    if "alertas_gol" not in st.session_state:
-        st.session_state.alertas_gol = set()
-
-    novos_gols = []
-
-    for chave, fontes in grupos.items():
-
-        if not fontes:
-            continue
-
-        # ----------------------------------------------------
-        # Encontra o maior placar observado
-        # ----------------------------------------------------
-
-        maior_casa = max(
-            x["gols_casa"]
-            for x in fontes
-        )
-
-        maior_fora = max(
-            x["gols_fora"]
-            for x in fontes
-        )
-
-        placar_atual = (
-            maior_casa,
-            maior_fora
-        )
-
-        placar_anterior = (
-            st.session_state
-            .placares_multifonte
-            .get(chave)
-        )
-
-        # Primeiro ciclo
-        if placar_anterior is None:
-
-            st.session_state\
-                .placares_multifonte[chave] = \
-                placar_atual
-
-            continue
-
-        gols_antigos = sum(
-            placar_anterior
-        )
-
-        gols_novos = sum(
-            placar_atual
-        )
-
-        if gols_novos <= gols_antigos:
-
-            st.session_state\
-                .placares_multifonte[chave] = \
-                placar_atual
-
-            continue
-
-        # ----------------------------------------------------
-        # Qual fonte viu o novo placar?
-        # ----------------------------------------------------
-
-        fontes_com_novo_placar = [
-            x
-            for x in fontes
-            if (
-                x["gols_casa"],
-                x["gols_fora"]
-            ) == placar_atual
-        ]
-
-        if not fontes_com_novo_placar:
-
-            fontes_com_novo_placar = fontes
-
-        # A primeira resposta registrada neste ciclo
-        # com o novo placar é considerada vencedora.
-        primeira = min(
-            fontes_com_novo_placar,
-            key=lambda x:
-            x["timestamp_resposta"]
-        )
-
-        evento_id = (
-            chave,
-            placar_atual
-        )
-
-        if evento_id not in st.session_state.alertas_gol:
-
-            st.session_state.alertas_gol.add(
-                evento_id
-            )
-
-            novo = {
-                "hora": horario(),
-                "casa": primeira["casa"],
-                "fora": primeira["fora"],
-                "liga": primeira["liga"],
-                "placar_anterior": placar_anterior,
-                "placar_novo": placar_atual,
-                "primeira_fonte": primeira["fonte"],
-                "fontes": fontes,
-                "minuto": primeira.get(
-                    "minuto"
-                )
-            }
-
-            novos_gols.append(
-                novo
-            )
-
-        st.session_state\
-            .placares_multifonte[chave] = \
-            placar_atual
-
-    return novos_gols
+        return f"Erro OpenRouter: {e}"
 
 
 # ============================================================
 # TELEGRAM
 # ============================================================
 
-def enviar_telegram(
-    gol
-):
-
+def enviar_telegram(mensagem):
     if not TELEGRAM_BOT_TOKEN:
-        return False
+        return False, "BOT_TOKEN não configurado"
 
     if not TELEGRAM_CHAT_ID:
-        return False
+        return False, "CHAT_ID não configurado"
+
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    )
 
     try:
-
-        fontes = ", ".join(
-            sorted(
-                set(
-                    x["fonte"]
-                    for x in gol["fontes"]
-                )
-            )
-        )
-
-        mensagem = (
-            "⚽ GOL DETECTADO\n\n"
-            f"{gol['casa']} "
-            f"{gol['placar_novo'][0]} x "
-            f"{gol['placar_novo'][1]} "
-            f"{gol['fora']}\n\n"
-            f"🏆 {gol['liga']}\n"
-            f"🕐 {gol['hora']}\n"
-            f"🚀 Primeira fonte: "
-            f"{gol['primeira_fonte']}\n"
-            f"📡 Fontes: {fontes}"
-        )
-
-        url = (
-            f"https://api.telegram.org/"
-            f"bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        )
-
-        response = requests.post(
+        r = requests.post(
             url,
             data={
                 "chat_id": TELEGRAM_CHAT_ID,
-                "text": mensagem
+                "text": mensagem,
             },
-            timeout=5
+            timeout=10
         )
 
-        return response.ok
+        if r.ok:
+            return True, "OK"
 
-    except Exception:
-        return False
+        return False, f"HTTP {r.status_code}"
 
-
-# ============================================================
-# SESSION STATE
-# ============================================================
-
-if "placares_multifonte" not in st.session_state:
-    st.session_state.placares_multifonte = {}
-
-if "alertas_gol" not in st.session_state:
-    st.session_state.alertas_gol = set()
-
-if "historico_gols" not in st.session_state:
-    st.session_state.historico_gols = []
-
-if "historico_fontes" not in st.session_state:
-    st.session_state.historico_fontes = []
+    except Exception as e:
+        return False, str(e)
 
 
 # ============================================================
-# INTERFACE
+# TODAS AS FONTES EM PARALELO
+# ============================================================
+
+def consultar_fontes():
+    fontes = [
+        ("ESPN", buscar_espn),
+        ("FiveDollar", buscar_fivedollar),
+        ("OpenFoot", buscar_openfoot),
+        ("FootballData", buscar_football_data),
+        ("TheSportsDB", buscar_thesportsdb),
+    ]
+
+    resultados = []
+
+    inicio_ciclo = time.perf_counter()
+
+    with ThreadPoolExecutor(
+        max_workers=5
+    ) as executor:
+
+        futures = {
+            executor.submit(func): nome
+            for nome, func in fontes
+        }
+
+        for future in as_completed(futures):
+            nome = futures[future]
+
+            try:
+                resultado = future.result()
+
+            except Exception as e:
+                resultado = {
+                    "source": nome,
+                    "events": [],
+                    "status": f"ERRO: {e}",
+                    "duracao": 0,
+                    "recebido": time.perf_counter(),
+                }
+
+            resultados.append(resultado)
+
+    fim_ciclo = time.perf_counter()
+
+    # Ordena pela hora REAL de recebimento.
+    resultados.sort(
+        key=lambda x: x.get(
+            "recebido",
+            float("inf")
+        )
+    )
+
+    return resultados, (
+        fim_ciclo - inicio_ciclo
+    )
+
+
+# ============================================================
+# INDEXAÇÃO
+# ============================================================
+
+def indexar_resultados(resultados):
+    jogos = {}
+
+    for resultado in resultados:
+
+        source = resultado.get(
+            "source",
+            ""
+        )
+
+        recebido = resultado.get(
+            "recebido",
+            time.perf_counter()
+        )
+
+        duracao = resultado.get(
+            "duracao",
+            0
+        )
+
+        for ev in resultado.get(
+            "events",
+            []
+        ):
+
+            home = ev.get("home")
+            away = ev.get("away")
+
+            if not home or not away:
+                continue
+
+            chave = chave_jogo(
+                home,
+                away
+            )
+
+            ev["received_at"] = recebido
+            ev["duration"] = duracao
+
+            if chave not in jogos:
+                jogos[chave] = []
+
+            jogos[chave].append(ev)
+
+    return jogos
+
+
+# ============================================================
+# DETECÇÃO DE GOLS
+# ============================================================
+
+def detectar_gols(jogos):
+    novos_gols = []
+
+    # Cada jogo é analisado separadamente.
+    for chave, eventos in jogos.items():
+
+        if not eventos:
+            continue
+
+        # Ordem REAL em que as respostas chegaram.
+        eventos_ordenados = sorted(
+            eventos,
+            key=lambda x: x.get(
+                "received_at",
+                float("inf")
+            )
+        )
+
+        # Último placar conhecido pelo conjunto das fontes.
+        placares = []
+
+        for ev in eventos_ordenados:
+            placares.append(
+                (
+                    ev["home_score"],
+                    ev["away_score"]
+                )
+            )
+
+        if not placares:
+            continue
+
+        melhor_score = max(
+            placares,
+            key=lambda x: sum(x)
+        )
+
+        home = eventos_ordenados[0]["home"]
+        away = eventos_ordenados[0]["away"]
+
+        nome = nome_jogo(
+            home,
+            away
+        )
+
+        estado_anterior = st.session_state.score_state.get(
+            chave
+        )
+
+        # Primeiro ciclo:
+        # apenas cria baseline.
+        if estado_anterior is None:
+
+            st.session_state.score_state[
+                chave
+            ] = melhor_score
+
+            continue
+
+        # Não houve mudança.
+        if (
+            melhor_score[0] <= estado_anterior[0]
+            and
+            melhor_score[1] <= estado_anterior[1]
+        ):
+            continue
+
+        # Encontrar a PRIMEIRA fonte que já
+        # havia recebido o novo placar.
+        fonte_primeira = None
+        evento_primeiro = None
+
+        for ev in eventos_ordenados:
+
+            score_ev = (
+                ev["home_score"],
+                ev["away_score"]
+            )
+
+            if (
+                score_ev[0] >= melhor_score[0]
+                and
+                score_ev[1] >= melhor_score[1]
+            ):
+                fonte_primeira = ev["source"]
+                evento_primeiro = ev
+                break
+
+        if not fonte_primeira:
+            fonte_primeira = eventos_ordenados[0]["source"]
+            evento_primeiro = eventos_ordenados[0]
+
+        # Timestamp de chegada da primeira fonte.
+        primeiro_recebimento = (
+            evento_primeiro.get(
+                "received_at"
+            )
+        )
+
+        # Ranking das fontes para esse jogo.
+        ranking = []
+
+        for ev in eventos_ordenados:
+
+            score_ev = (
+                ev["home_score"],
+                ev["away_score"]
+            )
+
+            if (
+                score_ev[0] >= melhor_score[0]
+                and
+                score_ev[1] >= melhor_score[1]
+            ):
+                ranking.append({
+                    "source": ev["source"],
+                    "received_at": ev.get(
+                        "received_at"
+                    ),
+                    "duration": ev.get(
+                        "duration",
+                        0
+                    ),
+                    "score": score_ev,
+                })
+
+        # Atualiza baseline.
+        st.session_state.score_state[
+            chave
+        ] = melhor_score
+
+        novos_gols.append({
+            "jogo": nome,
+            "home": home,
+            "away": away,
+            "anterior": estado_anterior,
+            "novo": melhor_score,
+            "fonte_primeira": fonte_primeira,
+            "evento": evento_primeiro,
+            "ranking": ranking,
+            "hora": agora_str(),
+            "league": evento_primeiro.get(
+                "league",
+                ""
+            ),
+        })
+
+    return novos_gols
+
+
+# ============================================================
+# ATUALIZAÇÃO DAS ESTATÍSTICAS DAS FONTES
+# ============================================================
+
+def atualizar_ranking_fontes(
+    resultados,
+    gols
+):
+    for resultado in resultados:
+
+        source = resultado.get(
+            "source"
+        )
+
+        if source not in st.session_state.source_stats:
+            st.session_state.source_stats[
+                source
+            ] = {
+                "consultas": 0,
+                "sucesso": 0,
+                "erros": 0,
+                "primeiros": 0,
+                "latencias": [],
+            }
+
+        stats = st.session_state.source_stats[
+            source
+        ]
+
+        stats["consultas"] += 1
+
+        status = str(
+            resultado.get(
+                "status",
+                ""
+            )
+        )
+
+        if status == "OK":
+            stats["sucesso"] += 1
+        else:
+            stats["erros"] += 1
+
+        duracao = resultado.get(
+            "duracao"
+        )
+
+        if duracao:
+            stats["latencias"].append(
+                duracao
+            )
+
+            # Limita memória.
+            stats["latencias"] = (
+                stats["latencias"][-500:]
+            )
+
+    # Quem ganhou cada corrida de gol?
+    for gol in gols:
+
+        vencedor = gol.get(
+            "fonte_primeira"
+        )
+
+        if not vencedor:
+            continue
+
+        if vencedor not in st.session_state.source_stats:
+            st.session_state.source_stats[
+                vencedor
+            ] = {
+                "consultas": 0,
+                "sucesso": 0,
+                "erros": 0,
+                "primeiros": 0,
+                "latencias": [],
+            }
+
+        st.session_state.source_stats[
+            vencedor
+        ]["primeiros"] += 1
+
+
+# ============================================================
+# PROCESSAMENTO DO CICLO
+# ============================================================
+
+def executar_ciclo():
+    resultados, tempo_ciclo = consultar_fontes()
+
+    jogos = indexar_resultados(
+        resultados
+    )
+
+    gols = detectar_gols(
+        jogos
+    )
+
+    atualizar_ranking_fontes(
+        resultados,
+        gols
+    )
+
+    st.session_state.last_cycle = {
+        "resultados": resultados,
+        "jogos": jogos,
+        "gols": gols,
+        "tempo": tempo_ciclo,
+        "hora": agora_str(),
+    }
+
+    st.session_state.cycle_count += 1
+
+    return (
+        resultados,
+        jogos,
+        gols,
+        tempo_ciclo
+    )
+
+
+# ============================================================
+# ALERTAS DE GOL
+# ============================================================
+
+def processar_alertas(gols):
+    for gol in gols:
+
+        jogo = gol["jogo"]
+
+        anterior = gol["anterior"]
+
+        novo = gol["novo"]
+
+        fonte = gol["fonte_primeira"]
+
+        mensagem = (
+            "⚽ GOL DETECTADO\n\n"
+            f"{jogo}\n"
+            f"{anterior[0]} x {anterior[1]}"
+            " → "
+            f"{novo[0]} x {novo[1]}\n\n"
+            f"🥇 Primeira fonte: {fonte}\n"
+            f"⏱️ Detecção: {gol['hora']}\n"
+        )
+
+        # ----------------------------------------------------
+        # OPENROUTER
+        # ----------------------------------------------------
+
+        analise = analisar_gol_openrouter(
+            jogo,
+            f"{anterior[0]} x {anterior[1]}",
+            f"{novo[0]} x {novo[1]}",
+            fonte
+        )
+
+        mensagem_completa = (
+            mensagem
+            + "\n🤖 ANÁLISE\n"
+            + analise
+        )
+
+        # ----------------------------------------------------
+        # HISTÓRICO
+        # ----------------------------------------------------
+
+        registro = {
+            "hora": gol["hora"],
+            "jogo": jogo,
+            "anterior": (
+                f"{anterior[0]} x "
+                f"{anterior[1]}"
+            ),
+            "novo": (
+                f"{novo[0]} x "
+                f"{novo[1]}"
+            ),
+            "primeira_fonte": fonte,
+            "analise": analise,
+            "ranking": gol["ranking"],
+        }
+
+        st.session_state.goal_history.insert(
+            0,
+            registro
+        )
+
+        # máximo 100 eventos
+        st.session_state.goal_history = (
+            st.session_state.goal_history[:100]
+        )
+
+        # ----------------------------------------------------
+        # TELEGRAM
+        # ----------------------------------------------------
+
+        if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID:
+            enviar_telegram(
+                mensagem_completa
+            )
+
+
+# ============================================================
+# SIDEBAR
+# ============================================================
+
+st.sidebar.title("⚙️ Configuração")
+
+intervalo = st.sidebar.slider(
+    "Intervalo de atualização",
+    min_value=2,
+    max_value=30,
+    value=DEFAULT_REFRESH,
+    step=1
+)
+
+st.sidebar.markdown("---")
+
+st.sidebar.subheader(
+    "🏆 Ligas ESPN"
+)
+
+ligas_selecionadas = st.sidebar.multiselect(
+    "Ligas consultadas pela ESPN",
+    list(ESPN_LEAGUES.keys()),
+    default=[
+        "Brasil Série A",
+        "Brasil Série B",
+        "Inglaterra Premier League",
+        "Espanha LaLiga",
+        "Itália Serie A",
+        "Alemanha Bundesliga",
+        "França Ligue 1",
+    ]
+)
+
+# Atualiza globalmente para esta execução.
+if ligas_selecionadas:
+    ESPN_LEAGUES_ATIVAS = {
+        nome: ESPN_LEAGUES[nome]
+        for nome in ligas_selecionadas
+    }
+else:
+    ESPN_LEAGUES_ATIVAS = {}
+
+
+# Substitui o conjunto usado pela função.
+ESPN_LEAGUES = ESPN_LEAGUES_ATIVAS
+
+
+st.sidebar.markdown("---")
+
+st.sidebar.subheader(
+    "🔔 Alertas"
+)
+
+telegram_ativo = bool(
+    TELEGRAM_BOT_TOKEN
+    and TELEGRAM_CHAT_ID
+)
+
+openrouter_ativo = bool(
+    OPENROUTER_API_KEY
+)
+
+
+# ============================================================
+# CABEÇALHO
 # ============================================================
 
 st.title(
-    "⚽ Football Multi-Source Scanner"
+    "⚽ Football Goal Race"
 )
 
 st.caption(
-    "ESPN + API-Football + football-data.org + TheSportsDB"
+    "Monitoramento simultâneo de fontes "
+    "com corrida de chegada do placar."
 )
 
 
 # ============================================================
-# CONTROLES
+# STATUS DAS FONTES
 # ============================================================
 
-col1, col2, col3 = st.columns(3)
+st.subheader(
+    "📡 Status das fontes"
+)
+
+col1, col2, col3, col4, col5 = st.columns(5)
 
 with col1:
-
-    ligas = st.multiselect(
-        "Ligas ESPN",
-        list(LIGAS_ESPN.keys()),
-        default=[
-            "Brasil Série A",
-            "Brasil Série B",
-            "Inglaterra Premier League",
-            "Espanha LaLiga",
-            "Itália Serie A",
-            "Alemanha Bundesliga",
-            "França Ligue 1",
-            "Argentina",
-            "Colômbia"
-        ]
+    st.metric(
+        "ESPN",
+        (
+            "🟢 ATIVA"
+            if time.time() >= st.session_state.espn_block_until
+            else "🟠 PAUSADA"
+        )
     )
 
 with col2:
-
-    intervalo = st.slider(
-        "Atualização",
-        2,
-        30,
-        5,
-        1
+    st.metric(
+        "FiveDollar",
+        (
+            "🟢 ATIVA"
+            if FIVEDOLLAR_FOOTBALL_API_KEY
+            else "🟡 SEM CHAVE"
+        )
     )
 
 with col3:
-
-    somente_ao_vivo = st.checkbox(
-        "Somente ao vivo",
-        True
-    )
-
-
-# ============================================================
-# BOTÕES
-# ============================================================
-
-if st.button(
-    "🗑️ Limpar histórico"
-):
-
-    st.session_state.placares_multifonte = {}
-    st.session_state.alertas_gol = set()
-    st.session_state.historico_gols = []
-    st.session_state.historico_fontes = []
-
-    st.rerun()
-
-
-# ============================================================
-# EXECUÇÃO
-# ============================================================
-
-inicio_ciclo = time.perf_counter()
-
-resultados, tempo_consulta = \
-    consultar_todas_as_fontes(
-        ligas
-    )
-
-
-# ============================================================
-# AGRUPAMENTO
-# ============================================================
-
-grupos = agrupar_partidas(
-    resultados
-)
-
-
-# ============================================================
-# GOLS
-# ============================================================
-
-novos_gols = detectar_gols_multifonte(
-    grupos
-)
-
-
-for gol in novos_gols:
-
-    st.session_state\
-        .historico_gols\
-        .insert(
-            0,
-            gol
-        )
-
-    enviar_telegram(
-        gol
-    )
-
-
-# ============================================================
-# JOGOS
-# ============================================================
-
-jogos_unicos = []
-
-for chave, fontes in grupos.items():
-
-    if not fontes:
-        continue
-
-    principal = max(
-        fontes,
-        key=lambda x:
+    st.metric(
+        "OpenFoot",
         (
-            x["gols_casa"] +
-            x["gols_fora"],
-            x["timestamp_resposta"]
+            "🟢 ATIVA"
+            if OPENFOOT_API_KEY
+            else "🟡 SEM CHAVE"
         )
     )
 
-    jogos_unicos.append(
-        principal
-    )
-
-
-if somente_ao_vivo:
-
-    jogos_exibidos = [
-        x
-        for x in jogos_unicos
-        if x.get("ao_vivo")
-    ]
-
-else:
-
-    jogos_exibidos = jogos_unicos
-
-
-# ============================================================
-# MÉTRICAS
-# ============================================================
-
-tempo_total = (
-    time.perf_counter()
-    - inicio_ciclo
-)
-
-fontes_ativas = sum(
-    1
-    for r in resultados
-    if not r.get("erro")
-)
-
-total_respostas = sum(
-    len(
-        r.get(
-            "eventos",
-            []
+with col4:
+    st.metric(
+        "FootballData",
+        (
+            "🟢 ATIVA"
+            if FOOTBALL_DATA_API_TOKEN
+            else "🟡 SEM TOKEN"
         )
     )
-    for r in resultados
+
+with col5:
+    st.metric(
+        "TheSportsDB",
+        (
+            "🟢 CONFIGURADA"
+            if THESPORTSDB_API_KEY
+            else "🟡 SEM CHAVE"
+        )
+    )
+
+
+# ============================================================
+# OPENROUTER / TELEGRAM
+# ============================================================
+
+col_a, col_b = st.columns(2)
+
+with col_a:
+    st.info(
+        "🤖 OpenRouter: "
+        + (
+            "ATIVO"
+            if openrouter_ativo
+            else "DESATIVADO"
+        )
+    )
+
+with col_b:
+    st.info(
+        "📲 Telegram: "
+        + (
+            "ATIVO"
+            if telegram_ativo
+            else "DESATIVADO"
+        )
+    )
+
+
+# ============================================================
+# EXECUTAR
+# ============================================================
+
+with st.spinner(
+    "Consultando as 5 fontes simultaneamente..."
+):
+    (
+        resultados,
+        jogos,
+        gols,
+        tempo_ciclo
+    ) = executar_ciclo()
+
+
+# Processar alertas somente após
+# detectar as mudanças.
+processar_alertas(
+    gols
 )
 
 
-m1, m2, m3, m4, m5 = st.columns(5)
+# ============================================================
+# RESUMO
+# ============================================================
 
-with m1:
+st.markdown("---")
+
+col1, col2, col3, col4 = st.columns(4)
+
+with col1:
     st.metric(
-        "Fontes",
-        len(resultados)
+        "Jogos encontrados",
+        len(jogos)
     )
 
-with m2:
+with col2:
     st.metric(
-        "Ativas",
-        fontes_ativas
+        "Gols neste ciclo",
+        len(gols)
     )
 
-with m3:
+with col3:
     st.metric(
-        "Jogos",
-        len(jogos_exibidos)
+        "Tempo do ciclo",
+        f"{tempo_ciclo:.3f}s"
     )
 
-with m4:
-    st.metric(
-        "Respostas",
-        total_respostas
-    )
-
-with m5:
+with col4:
     st.metric(
         "Ciclo",
-        f"{tempo_total:.2f}s"
+        st.session_state.cycle_count
     )
 
 
-st.caption(
-    f"🚀 Consultas paralelas | "
-    f"Tempo das APIs: {tempo_consulta:.2f}s | "
-    f"Atualização: {intervalo}s"
-)
-
-
 # ============================================================
-# ALERTAS
+# GOLS DETECTADOS
 # ============================================================
 
-if novos_gols:
+if gols:
+
+    st.markdown("---")
 
     st.subheader(
-        "🚨 GOLS DETECTADOS"
+        "🚨 GOL(S) DETECTADO(S)"
     )
 
-    for gol in novos_gols:
+    for gol in gols:
 
-        st.error(
-            f"⚽ {gol['casa']} "
-            f"{gol['placar_novo'][0]} x "
-            f"{gol['placar_novo'][1]} "
-            f"{gol['fora']} | "
-            f"🚀 {gol['primeira_fonte']} | "
-            f"🕐 {gol['hora']}"
+        st.success(
+            f"⚽ {gol['jogo']}  |  "
+            f"{gol['anterior'][0]} x "
+            f"{gol['anterior'][1]}"
+            " → "
+            f"{gol['novo'][0]} x "
+            f"{gol['novo'][1]}"
         )
+
+        st.write(
+            f"🥇 **Primeira fonte:** "
+            f"{gol['fonte_primeira']}"
+        )
+
+        if gol.get("league"):
+            st.write(
+                f"🏆 **Liga:** "
+                f"{gol['league']}"
+            )
+
+        st.write(
+            f"🕐 **Detectado às:** "
+            f"{gol['hora']}"
+        )
+
+        if gol["ranking"]:
+
+            tabela = []
+
+            base = (
+                gol["ranking"][0]
+                ["received_at"]
+            )
+
+            for pos, item in enumerate(
+                gol["ranking"],
+                start=1
+            ):
+
+                atraso = (
+                    item["received_at"]
+                    - base
+                )
+
+                tabela.append({
+                    "#": pos,
+                    "Fonte": item["source"],
+                    "Placar": (
+                        f"{item['score'][0]} x "
+                        f"{item['score'][1]}"
+                    ),
+                    "Tempo requisição": (
+                        f"{item['duration']:.3f}s"
+                    ),
+                    "Atraso após 1ª": (
+                        f"+{atraso:.3f}s"
+                    ),
+                })
+
+            st.dataframe(
+                tabela,
+                use_container_width=True,
+                hide_index=True
+            )
+
+        # análise OpenRouter
+        if st.session_state.goal_history:
+
+            analise_atual = (
+                st.session_state.goal_history[0]
+                .get("analise", "")
+            )
+
+            if analise_atual:
+                st.markdown(
+                    "**🤖 OpenRouter**"
+                )
+
+                st.code(
+                    analise_atual,
+                    language="text"
+                )
 
 
 # ============================================================
 # JOGOS AO VIVO
 # ============================================================
 
+st.markdown("---")
+
 st.subheader(
     "🔴 Jogos monitorados"
 )
 
-for jogo in jogos_exibidos:
+linhas = []
 
-    st.markdown(
-        f"""
-### 🔴 {jogo['casa']}
-**{jogo['gols_casa']} x {jogo['gols_fora']}**
-{jogo['fora']}
+for chave, eventos in jogos.items():
 
-🏆 {jogo['liga']}  
-⏱️ {jogo['status']}
-"""
+    if not eventos:
+        continue
+
+    # Preferir o último placar conhecido.
+    eventos_ordenados = sorted(
+        eventos,
+        key=lambda x: x.get(
+            "received_at",
+            0
+        )
+    )
+
+    ultimo = eventos_ordenados[-1]
+
+    fontes = sorted(
+        set(
+            e["source"]
+            for e in eventos
+        )
+    )
+
+    linhas.append({
+        "Jogo": nome_jogo(
+            ultimo["home"],
+            ultimo["away"]
+        ),
+        "Placar": (
+            f"{ultimo['home_score']} x "
+            f"{ultimo['away_score']}"
+        ),
+        "Minuto": (
+            ultimo.get("minute")
+            or "-"
+        ),
+        "Liga": (
+            ultimo.get("league")
+            or "-"
+        ),
+        "Fontes": ", ".join(fontes),
+    })
+
+
+if linhas:
+
+    linhas.sort(
+        key=lambda x: x["Jogo"]
+    )
+
+    st.dataframe(
+        linhas,
+        use_container_width=True,
+        hide_index=True
+    )
+
+else:
+
+    st.warning(
+        "Nenhum jogo ao vivo foi retornado "
+        "pelas fontes neste ciclo."
     )
 
 
 # ============================================================
-# PAINEL DE FONTES
+# RANKING DAS FONTES
 # ============================================================
+
+st.markdown("---")
 
 st.subheader(
-    "📡 Desempenho das fontes"
+    "🏁 Ranking de velocidade das fontes"
 )
 
-for resultado in sorted(
-    resultados,
-    key=lambda x: x.get(
-        "tempo",
-        999
-    )
+ranking_fontes = []
+
+for source, stats in (
+    st.session_state.source_stats.items()
 ):
 
-    fonte = resultado["fonte"]
-    erro = resultado.get("erro")
-    tempo = resultado.get(
-        "tempo",
-        0
+    latencias = stats.get(
+        "latencias",
+        []
     )
 
-    if erro:
+    media = (
+        sum(latencias) / len(latencias)
+        if latencias
+        else 0
+    )
 
-        st.write(
-            f"🔴 **{fonte}** — "
-            f"erro: {erro}"
+    ranking_fontes.append({
+        "Fonte": source,
+        "🥇 Primeiras": stats.get(
+            "primeiros",
+            0
+        ),
+        "Consultas": stats.get(
+            "consultas",
+            0
+        ),
+        "Sucesso": stats.get(
+            "sucesso",
+            0
+        ),
+        "Erros": stats.get(
+            "erros",
+            0
+        ),
+        "Latência média": (
+            f"{media:.3f}s"
+            if media
+            else "-"
+        ),
+    })
+
+
+ranking_fontes.sort(
+    key=lambda x: (
+        -x["🥇 Primeiras"],
+        float(
+            x["Latência média"]
+            .replace("s", "")
         )
-
-    else:
-
-        quantidade = len(
-            resultado.get(
-                "eventos",
-                []
-            )
-        )
-
-        st.write(
-            f"🟢 **{fonte}** — "
-            f"{tempo:.3f}s — "
-            f"{quantidade} jogos"
-        )
-
-
-# ============================================================
-# HISTÓRICO DE GOLS
-# ============================================================
-
-st.subheader(
-    "📋 Histórico de detecção"
+        if x["Latência média"] != "-"
+        else 999
+    )
 )
 
-if st.session_state.historico_gols:
+if ranking_fontes:
 
-    for gol in st.session_state.historico_gols[:30]:
+    st.dataframe(
+        ranking_fontes,
+        use_container_width=True,
+        hide_index=True
+    )
 
-        st.markdown(
-            f"""
-**{gol['hora']}**
 
-⚽ **{gol['casa']}**
-{gol['placar_anterior'][0]} →
-{gol['placar_novo'][0]}
+# ============================================================
+# HISTÓRICO
+# ============================================================
 
-**{gol['fora']}**
-{gol['placar_anterior'][1]} →
-{gol['placar_novo'][1]}
+st.markdown("---")
 
-🚀 Primeira fonte:
-**{gol['primeira_fonte']}**
+st.subheader(
+    "📜 Histórico de gols"
+)
 
-🏆 {gol['liga']}
-"""
-        )
+if st.session_state.goal_history:
+
+    historico = []
+
+    for item in (
+        st.session_state.goal_history
+    ):
+
+        historico.append({
+            "Hora": item["hora"],
+            "Jogo": item["jogo"],
+            "Anterior": item["anterior"],
+            "Novo": item["novo"],
+            "Primeira fonte": (
+                item["primeira_fonte"]
+            ),
+        })
+
+    st.dataframe(
+        historico,
+        use_container_width=True,
+        hide_index=True
+    )
 
 else:
 
     st.info(
-        "Nenhum gol detectado desde o início."
+        "Nenhum gol novo detectado desde "
+        "o início do monitor."
     )
 
 
 # ============================================================
-# ATUALIZAÇÃO
+# DIAGNÓSTICO DAS FONTES
 # ============================================================
 
-time.sleep(
-    intervalo
+st.markdown("---")
+
+st.subheader(
+    "🔧 Diagnóstico"
 )
+
+diagnostico = []
+
+for resultado in sorted(
+    resultados,
+    key=lambda x: x.get(
+        "recebido",
+        float("inf")
+    )
+):
+
+    diagnostico.append({
+        "Fonte": resultado.get(
+            "source"
+        ),
+        "Status": resultado.get(
+            "status"
+        ),
+        "Jogos": len(
+            resultado.get(
+                "events",
+                []
+            )
+        ),
+        "Resposta": (
+            f"{resultado.get('duracao', 0):.3f}s"
+        ),
+    })
+
+
+st.dataframe(
+    diagnostico,
+    use_container_width=True,
+    hide_index=True
+)
+
+
+# ============================================================
+# RODAPÉ
+# ============================================================
+
+st.caption(
+    f"Último ciclo: "
+    f"{st.session_state.last_cycle['hora'] "
+    if st.session_state.last_cycle else agora_str()} "
+    f"| Próxima atualização em {intervalo}s"
+)
+
+
+# ============================================================
+# AUTO REFRESH
+# ============================================================
+
+time.sleep(intervalo)
 
 st.rerun()
