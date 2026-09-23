@@ -12,7 +12,11 @@ import streamlit as st
 # CONFIGURAÇÃO
 # ============================================================
 
-APP_TITLE = "Football Scanner — Multi-Source Live"
+st.set_page_config(
+    page_title="Football Scanner",
+    page_icon="⚽",
+    layout="wide",
+)
 
 REQUEST_TIMEOUT = 8
 OPENROUTER_TIMEOUT = 15
@@ -22,11 +26,8 @@ MIN_INTERVAL = 5
 MAX_INTERVAL = 300
 
 SOURCE_WORKERS = 6
-
-# Após 403, não ficar martelando a ESPN.
 ESPN_COOLDOWN = 120
 
-# Ligas ESPN públicas
 ESPN_LEAGUES = [
     "eng.1",
     "esp.1",
@@ -47,32 +48,14 @@ ESPN_LEAGUES = [
 
 
 # ============================================================
-# STREAMLIT
-# ============================================================
-
-st.set_page_config(
-    page_title=APP_TITLE,
-    page_icon="⚽",
-    layout="wide",
-)
-
-
-# ============================================================
-# CHAVES
+# FUNÇÃO PARA LER SECRETS
 # ============================================================
 
 def get_secret(name, default=""):
-    """
-    Primeiro tenta Streamlit Secrets.
-    Depois tenta variável de ambiente.
-    """
-
     try:
         value = st.secrets.get(name)
-
         if value:
             return str(value).strip()
-
     except Exception:
         pass
 
@@ -156,24 +139,17 @@ def utc_now():
 
 
 def safe_int(value, default=0):
-
     try:
-
-        if value is None:
-            return default
-
-        if value == "":
+        if value is None or value == "":
             return default
 
         return int(float(value))
 
     except Exception:
-
         return default
 
 
 def text(value):
-
     if value is None:
         return ""
 
@@ -181,24 +157,25 @@ def text(value):
 
 
 def path(obj, *keys):
-
     current = obj
 
     for key in keys:
 
         if isinstance(current, dict):
-
             current = current.get(key)
 
-        elif isinstance(current, (list, tuple)):
+        elif isinstance(current, list):
 
-            if isinstance(key, int) and 0 <= key < len(current):
-                current = current[key]
+            if isinstance(key, int):
+                if 0 <= key < len(current):
+                    current = current[key]
+                else:
+                    return None
+
             else:
                 return None
 
         else:
-
             return None
 
     return current
@@ -244,6 +221,7 @@ def parse_score(value):
         )
 
         if home is not None and away is not None:
+
             return (
                 safe_int(home),
                 safe_int(away),
@@ -270,7 +248,6 @@ def create_id(
 ):
 
     if raw_id not in (None, ""):
-
         return f"{source}:{raw_id}"
 
     base = (
@@ -279,7 +256,9 @@ def create_id(
         .encode()
     )
 
-    digest = hashlib.sha1(base).hexdigest()[:16]
+    digest = hashlib.sha1(
+        base
+    ).hexdigest()[:16]
 
     return f"{source}:{digest}"
 
@@ -288,7 +267,7 @@ def create_id(
 # EVENTO PADRONIZADO
 # ============================================================
 
-def event(
+def make_event(
     source,
     raw_id,
     home,
@@ -310,7 +289,6 @@ def event(
     away_score = safe_int(away_score)
 
     return {
-
         "id": create_id(
             source,
             raw_id,
@@ -318,39 +296,23 @@ def event(
             away,
             kickoff,
         ),
-
         "raw_id": raw_id,
-
         "source": source,
-
         "home": home,
-
         "away": away,
-
         "home_score": home_score,
-
         "away_score": away_score,
-
-        "score": (
-            f"{home_score}-{away_score}"
-        ),
-
+        "score": f"{home_score}-{away_score}",
         "status": text(status),
-
         "minute": text(minute),
-
         "kickoff": text(kickoff),
-
         "league": text(league),
-
         "country": text(country),
 
-        # IMPORTANTE:
-        # instante absoluto de chegada da resposta.
+        # Momento exato da chegada da resposta
         "received_at": time.perf_counter(),
 
         "received_wall": utc_now(),
-
         "raw": raw,
     }
 
@@ -374,11 +336,9 @@ def get_json(
     )
 
     try:
-
         data = response.json()
 
     except Exception:
-
         data = {}
 
     return response, data
@@ -394,66 +354,14 @@ def source_result(
 ):
 
     return {
-
         "source": name,
-
         "events": events or [],
-
         "ok": ok,
-
         "status": status,
-
         "error": error,
-
         "elapsed": elapsed,
-
         "received_at": time.perf_counter(),
     }
-
-
-# ============================================================
-# ESTATÍSTICAS
-# ============================================================
-
-def register_source(result):
-
-    name = result["source"]
-
-    stats = st.session_state.source_stats.setdefault(
-        name,
-        {
-            "calls": 0,
-            "ok": 0,
-            "errors": 0,
-            "last_status": None,
-            "last_error": "",
-            "last_ms": 0,
-        },
-    )
-
-    stats["calls"] += 1
-
-    stats["last_status"] = result.get(
-        "status"
-    )
-
-    stats["last_error"] = result.get(
-        "error",
-        "",
-    )
-
-    if result.get("ok"):
-        stats["ok"] += 1
-    else:
-        stats["errors"] += 1
-
-    elapsed = result.get("elapsed")
-
-    if elapsed is not None:
-        stats["last_ms"] = round(
-            elapsed * 1000,
-            1,
-        )
 
 
 # ============================================================
@@ -489,7 +397,7 @@ def normalize_espn(item):
         elif competitor.get("homeAway") == "away":
             away = competitor
 
-    return event(
+    return make_event(
 
         "ESPN",
 
@@ -574,13 +482,11 @@ def fetch_espn_league(league):
         )
 
     urls = [
-
         (
             "https://site.web.api.espn.com"
             f"/apis/site/v2/sports/soccer/"
             f"{league}/scoreboard"
         ),
-
         (
             "https://site.api.espn.com"
             f"/apis/site/v2/sports/soccer/"
@@ -596,9 +502,7 @@ def fetch_espn_league(league):
         try:
 
             response, data = get_json(
-
                 url,
-
                 headers={
                     "Accept": "application/json",
                     "Accept-Encoding": "gzip, deflate",
@@ -610,13 +514,11 @@ def fetch_espn_league(league):
             if response.status_code == 403:
 
                 last_error = "HTTP 403"
-
                 continue
 
             if response.status_code == 429:
 
                 last_error = "HTTP 429"
-
                 break
 
             if response.status_code >= 400:
@@ -624,7 +526,6 @@ def fetch_espn_league(league):
                 last_error = (
                     f"HTTP {response.status_code}"
                 )
-
                 continue
 
             raw_events = (
@@ -637,25 +538,18 @@ def fetch_espn_league(league):
             for item in raw_events:
 
                 try:
-
                     events.append(
                         normalize_espn(item)
                     )
 
                 except Exception:
-
-                    continue
+                    pass
 
             return source_result(
-
                 f"ESPN/{league}",
-
                 events=events,
-
                 ok=True,
-
                 status=response.status_code,
-
                 elapsed=time.perf_counter() - start,
             )
 
@@ -670,15 +564,10 @@ def fetch_espn_league(league):
         )
 
     return source_result(
-
         f"ESPN/{league}",
-
         ok=False,
-
         status=last_status,
-
         error=last_error,
-
         elapsed=time.perf_counter() - start,
     )
 
@@ -693,36 +582,24 @@ def fetch_espn():
     ):
 
         return source_result(
-
             "ESPN",
-
             ok=False,
-
             status=403,
-
             error="ESPN em cooldown após HTTP 403",
-
             elapsed=time.perf_counter() - start,
         )
 
     results = []
 
-    workers = min(
-        8,
-        len(ESPN_LEAGUES),
-    )
-
     with ThreadPoolExecutor(
-        max_workers=workers
+        max_workers=8
     ) as executor:
 
         futures = {
-
             executor.submit(
                 fetch_espn_league,
                 league,
             ): league
-
             for league in ESPN_LEAGUES
         }
 
@@ -731,7 +608,6 @@ def fetch_espn():
         ):
 
             try:
-
                 results.append(
                     future.result()
                 )
@@ -747,9 +623,7 @@ def fetch_espn():
                 )
 
     events = []
-
     errors = []
-
     any_ok = False
 
     for result in results:
@@ -761,416 +635,24 @@ def fetch_espn():
             result.get("events", [])
         )
 
-        if not result.get("ok"):
-
-            if result.get("error"):
-
-                errors.append(
-                    f"{result['source']}: "
-                    f"{result['error']}"
-                )
+        if result.get("error"):
+            errors.append(
+                f"{result['source']}: "
+                f"{result['error']}"
+            )
 
     return source_result(
-
         "ESPN",
-
         events=events,
-
         ok=any_ok,
-
-        status=(
-            200
-            if any_ok
-            else 403
-            if any(
-                x.get("status") == 403
-                for x in results
-            )
-            else None
-        ),
-
-        error=" | ".join(
-            errors[:5]
-        ),
-
+        status=200 if any_ok else None,
+        error=" | ".join(errors[:5]),
         elapsed=time.perf_counter() - start,
     )
 
 
 # ============================================================
-# 5DOLLAR
-# ============================================================
-
-def normalize_5dollar(item):
-
-    teams = item.get(
-        "teams"
-    ) or {}
-
-    home = (
-        teams.get("home")
-        or {}
-    )
-
-    away = (
-        teams.get("away")
-        or {}
-    )
-
-    goals = (
-        item.get("goals")
-        or {}
-    )
-
-    return event(
-
-        "5Dollar",
-
-        item.get("id"),
-
-        home.get("name"),
-
-        away.get("name"),
-
-        goals.get("home", 0),
-
-        goals.get("away", 0),
-
-        status=item.get(
-            "status",
-            "",
-        ),
-
-        minute=(
-            item.get("minute")
-            or item.get("status_code")
-            or ""
-        ),
-
-        kickoff=(
-            item.get(
-                "kickoff_utc",
-                "",
-            )
-        ),
-
-        league=path(
-            item,
-            "league",
-            "name",
-        ),
-
-        raw=item,
-    )
-
-
-def fetch_5dollar():
-
-    start = time.perf_counter()
-
-    if not FIVEDOLLAR_KEY:
-
-        return source_result(
-
-            "5Dollar",
-
-            ok=False,
-
-            error=(
-                "FIVEDOLLAR_FOOTBALL_API_KEY "
-                "não configurada"
-            ),
-
-            elapsed=time.perf_counter() - start,
-        )
-
-    try:
-
-        response, data = get_json(
-
-            "https://api.5dollarfootballapi.com/v1/fixtures",
-
-            headers={
-                "Authorization":
-                    f"Bearer {FIVEDOLLAR_KEY}",
-                "Accept":
-                    "application/json",
-            },
-
-            params={
-                "status": "live",
-            },
-        )
-
-        if response.status_code >= 400:
-
-            return source_result(
-
-                "5Dollar",
-
-                ok=False,
-
-                status=response.status_code,
-
-                error=str(data)[:500],
-
-                elapsed=time.perf_counter() - start,
-            )
-
-        raw = []
-
-        if isinstance(data, list):
-            raw = data
-
-        elif isinstance(data, dict):
-
-            for key in (
-                "data",
-                "fixtures",
-                "matches",
-                "results",
-            ):
-
-                if isinstance(
-                    data.get(key),
-                    list,
-                ):
-
-                    raw = data[key]
-
-                    break
-
-        events = []
-
-        for item in raw:
-
-            try:
-
-                events.append(
-                    normalize_5dollar(item)
-                )
-
-            except Exception:
-
-                continue
-
-        return source_result(
-
-            "5Dollar",
-
-            events=events,
-
-            ok=True,
-
-            status=response.status_code,
-
-            elapsed=time.perf_counter() - start,
-        )
-
-    except Exception as exc:
-
-        return source_result(
-
-            "5Dollar",
-
-            ok=False,
-
-            error=str(exc),
-
-            elapsed=time.perf_counter() - start,
-        )
-
-
-# ============================================================
-# OPENFOOT
-# ============================================================
-
-def normalize_openfoot(item):
-
-    home = (
-        item.get("homeTeam")
-        or {}
-    )
-
-    away = (
-        item.get("awayTeam")
-        or {}
-    )
-
-    score = (
-        item.get("score")
-        or item.get("goals")
-        or {}
-    )
-
-    hs, aws = parse_score(
-        score
-    )
-
-    return event(
-
-        "OpenFoot",
-
-        item.get("id"),
-
-        home.get("name")
-        or item.get("home"),
-
-        away.get("name")
-        or item.get("away"),
-
-        hs,
-
-        aws,
-
-        status=item.get(
-            "status",
-            "",
-        ),
-
-        minute=(
-            item.get("minute")
-            or item.get("elapsed")
-            or ""
-        ),
-
-        kickoff=(
-            item.get("kickoffAt")
-            or item.get("kickoff")
-            or ""
-        ),
-
-        league=path(
-            item,
-            "competition",
-            "name",
-        ),
-
-        raw=item,
-    )
-
-
-def fetch_openfoot():
-
-    start = time.perf_counter()
-
-    headers = {
-        "Accept":
-            "application/json",
-    }
-
-    if OPENFOOT_KEY:
-
-        headers[
-            "Authorization"
-        ] = (
-            f"Bearer {OPENFOOT_KEY}"
-        )
-
-    try:
-
-        date_str = (
-            datetime.now(
-                timezone.utc
-            ).strftime(
-                "%Y-%m-%d"
-            )
-        )
-
-        response, data = get_json(
-
-            "https://openfootapi.com/v1/matches",
-
-            headers=headers,
-
-            params={
-                "date": date_str,
-            },
-        )
-
-        if response.status_code >= 400:
-
-            return source_result(
-
-                "OpenFoot",
-
-                ok=False,
-
-                status=response.status_code,
-
-                error=str(data)[:500],
-
-                elapsed=time.perf_counter() - start,
-            )
-
-        raw = []
-
-        if isinstance(data, list):
-
-            raw = data
-
-        elif isinstance(data, dict):
-
-            for key in (
-                "data",
-                "matches",
-                "fixtures",
-                "events",
-                "results",
-            ):
-
-                if isinstance(
-                    data.get(key),
-                    list,
-                ):
-
-                    raw = data[key]
-
-                    break
-
-        events = []
-
-        for item in raw:
-
-            try:
-
-                events.append(
-                    normalize_openfoot(item)
-                )
-
-            except Exception:
-
-                continue
-
-        return source_result(
-
-            "OpenFoot",
-
-            events=events,
-
-            ok=True,
-
-            status=response.status_code,
-
-            elapsed=time.perf_counter() - start,
-        )
-
-    except Exception as exc:
-
-        return source_result(
-
-            "OpenFoot",
-
-            ok=False,
-
-            error=str(exc),
-
-            elapsed=time.perf_counter() - start,
-        )
-
-
-# ============================================================
-# FOOTBALL-DATA.ORG
+# FOOTBALL-DATA
 # ============================================================
 
 def normalize_football_data(item):
@@ -1185,17 +667,7 @@ def normalize_football_data(item):
         or {}
     )
 
-    home_score = full_time.get(
-        "home",
-        0,
-    )
-
-    away_score = full_time.get(
-        "away",
-        0,
-    )
-
-    return event(
+    return make_event(
 
         "FootballData",
 
@@ -1213,9 +685,15 @@ def normalize_football_data(item):
             "name",
         ),
 
-        home_score,
+        full_time.get(
+            "home",
+            0,
+        ),
 
-        away_score,
+        full_time.get(
+            "away",
+            0,
+        ),
 
         status=item.get(
             "status",
@@ -1250,16 +728,12 @@ def fetch_football_data():
     if not FOOTBALL_DATA_TOKEN:
 
         return source_result(
-
             "FootballData",
-
             ok=False,
-
             error=(
                 "FOOTBALL_DATA_API_TOKEN "
                 "não configurada"
             ),
-
             elapsed=time.perf_counter() - start,
         )
 
@@ -1284,15 +758,10 @@ def fetch_football_data():
         if response.status_code >= 400:
 
             return source_result(
-
                 "FootballData",
-
                 ok=False,
-
                 status=response.status_code,
-
                 error=str(data)[:500],
-
                 elapsed=time.perf_counter() - start,
             )
 
@@ -1306,7 +775,6 @@ def fetch_football_data():
         for item in raw:
 
             try:
-
                 events.append(
                     normalize_football_data(
                         item
@@ -1314,32 +782,22 @@ def fetch_football_data():
                 )
 
             except Exception:
-
-                continue
+                pass
 
         return source_result(
-
             "FootballData",
-
             events=events,
-
             ok=True,
-
             status=response.status_code,
-
             elapsed=time.perf_counter() - start,
         )
 
     except Exception as exc:
 
         return source_result(
-
             "FootballData",
-
             ok=False,
-
             error=str(exc),
-
             elapsed=time.perf_counter() - start,
         )
 
@@ -1365,7 +823,7 @@ def normalize_api_football(item):
         or {}
     )
 
-    return event(
+    return make_event(
 
         "APIFootball",
 
@@ -1433,16 +891,12 @@ def fetch_api_football():
     if not API_FOOTBALL_KEY:
 
         return source_result(
-
             "APIFootball",
-
             ok=False,
-
             error=(
                 "API_FOOTBALL_KEY "
                 "não configurada"
             ),
-
             elapsed=time.perf_counter() - start,
         )
 
@@ -1467,15 +921,10 @@ def fetch_api_football():
         if response.status_code >= 400:
 
             return source_result(
-
                 "APIFootball",
-
                 ok=False,
-
                 status=response.status_code,
-
                 error=str(data)[:500],
-
                 elapsed=time.perf_counter() - start,
             )
 
@@ -1489,7 +938,6 @@ def fetch_api_football():
         for item in raw:
 
             try:
-
                 events.append(
                     normalize_api_football(
                         item
@@ -1497,49 +945,37 @@ def fetch_api_football():
                 )
 
             except Exception:
-
-                continue
+                pass
 
         return source_result(
-
             "APIFootball",
-
             events=events,
-
             ok=True,
-
             status=response.status_code,
-
             elapsed=time.perf_counter() - start,
         )
 
     except Exception as exc:
 
         return source_result(
-
             "APIFootball",
-
             ok=False,
-
             error=str(exc),
-
             elapsed=time.perf_counter() - start,
         )
 
 
 # ============================================================
-# THE SPORTS DB
+# THESPORTSDB
 # ============================================================
 
 def normalize_tsdb(item):
 
-    return event(
+    return make_event(
 
         "TheSportsDB",
 
-        item.get(
-            "idEvent"
-        ),
+        item.get("idEvent"),
 
         item.get(
             "strHomeTeam"
@@ -1595,16 +1031,12 @@ def fetch_tsdb():
     if not THESPORTSDB_KEY:
 
         return source_result(
-
             "TheSportsDB",
-
             ok=False,
-
             error=(
                 "THESPORTSDB_API_KEY "
                 "não configurada"
             ),
-
             elapsed=time.perf_counter() - start,
         )
 
@@ -1625,15 +1057,10 @@ def fetch_tsdb():
         if response.status_code >= 400:
 
             return source_result(
-
                 "TheSportsDB",
-
                 ok=False,
-
                 status=response.status_code,
-
                 error=str(data)[:500],
-
                 elapsed=time.perf_counter() - start,
             )
 
@@ -1658,7 +1085,6 @@ def fetch_tsdb():
                 ):
 
                     raw = data[key]
-
                     break
 
         events = []
@@ -1666,38 +1092,349 @@ def fetch_tsdb():
         for item in raw:
 
             try:
-
                 events.append(
                     normalize_tsdb(item)
                 )
 
             except Exception:
-
-                continue
+                pass
 
         return source_result(
-
             "TheSportsDB",
-
             events=events,
-
             ok=True,
-
             status=response.status_code,
-
             elapsed=time.perf_counter() - start,
         )
 
     except Exception as exc:
 
         return source_result(
-
             "TheSportsDB",
-
             ok=False,
-
             error=str(exc),
+            elapsed=time.perf_counter() - start,
+        )
 
+
+# ============================================================
+# 5DOLLAR
+# ============================================================
+
+def normalize_5dollar(item):
+
+    teams = (
+        item.get("teams")
+        or {}
+    )
+
+    home = (
+        teams.get("home")
+        or {}
+    )
+
+    away = (
+        teams.get("away")
+        or {}
+    )
+
+    goals = (
+        item.get("goals")
+        or {}
+    )
+
+    return make_event(
+
+        "5Dollar",
+
+        item.get("id"),
+
+        home.get("name"),
+        away.get("name"),
+
+        goals.get("home", 0),
+        goals.get("away", 0),
+
+        status=item.get(
+            "status",
+            "",
+        ),
+
+        minute=(
+            item.get("minute")
+            or ""
+        ),
+
+        kickoff=(
+            item.get(
+                "kickoff_utc",
+                "",
+            )
+        ),
+
+        league=path(
+            item,
+            "league",
+            "name",
+        ),
+
+        raw=item,
+    )
+
+
+def fetch_5dollar():
+
+    start = time.perf_counter()
+
+    if not FIVEDOLLAR_KEY:
+
+        return source_result(
+            "5Dollar",
+            ok=False,
+            error=(
+                "FIVEDOLLAR_FOOTBALL_API_KEY "
+                "não configurada"
+            ),
+            elapsed=time.perf_counter() - start,
+        )
+
+    try:
+
+        response, data = get_json(
+
+            "https://api.5dollarfootballapi.com/v1/fixtures",
+
+            headers={
+                "Authorization":
+                    f"Bearer {FIVEDOLLAR_KEY}",
+                "Accept":
+                    "application/json",
+            },
+
+            params={
+                "status": "live",
+            },
+        )
+
+        if response.status_code >= 400:
+
+            return source_result(
+                "5Dollar",
+                ok=False,
+                status=response.status_code,
+                error=str(data)[:500],
+                elapsed=time.perf_counter() - start,
+            )
+
+        raw = []
+
+        if isinstance(data, list):
+
+            raw = data
+
+        elif isinstance(data, dict):
+
+            for key in (
+                "data",
+                "fixtures",
+                "matches",
+                "results",
+            ):
+
+                if isinstance(
+                    data.get(key),
+                    list,
+                ):
+
+                    raw = data[key]
+                    break
+
+        events = []
+
+        for item in raw:
+
+            try:
+                events.append(
+                    normalize_5dollar(
+                        item
+                    )
+                )
+
+            except Exception:
+                pass
+
+        return source_result(
+            "5Dollar",
+            events=events,
+            ok=True,
+            status=response.status_code,
+            elapsed=time.perf_counter() - start,
+        )
+
+    except Exception as exc:
+
+        return source_result(
+            "5Dollar",
+            ok=False,
+            error=str(exc),
+            elapsed=time.perf_counter() - start,
+        )
+
+
+# ============================================================
+# OPENFOOT
+# ============================================================
+
+def normalize_openfoot(item):
+
+    home = (
+        item.get("homeTeam")
+        or {}
+    )
+
+    away = (
+        item.get("awayTeam")
+        or {}
+    )
+
+    score = (
+        item.get("score")
+        or item.get("goals")
+        or {}
+    )
+
+    hs, aws = parse_score(score)
+
+    return make_event(
+
+        "OpenFoot",
+
+        item.get("id"),
+
+        home.get("name")
+        or item.get("home"),
+
+        away.get("name")
+        or item.get("away"),
+
+        hs,
+        aws,
+
+        status=item.get(
+            "status",
+            "",
+        ),
+
+        minute=(
+            item.get("minute")
+            or item.get("elapsed")
+            or ""
+        ),
+
+        kickoff=(
+            item.get("kickoffAt")
+            or item.get("kickoff")
+            or ""
+        ),
+
+        league=path(
+            item,
+            "competition",
+            "name",
+        ),
+
+        raw=item,
+    )
+
+
+def fetch_openfoot():
+
+    start = time.perf_counter()
+
+    headers = {
+        "Accept":
+            "application/json"
+    }
+
+    if OPENFOOT_KEY:
+
+        headers[
+            "Authorization"
+        ] = (
+            f"Bearer {OPENFOOT_KEY}"
+        )
+
+    try:
+
+        response, data = get_json(
+
+            "https://openfootapi.com/v1/matches",
+
+            headers=headers,
+        )
+
+        if response.status_code >= 400:
+
+            return source_result(
+                "OpenFoot",
+                ok=False,
+                status=response.status_code,
+                error=str(data)[:500],
+                elapsed=time.perf_counter() - start,
+            )
+
+        raw = []
+
+        if isinstance(data, list):
+
+            raw = data
+
+        elif isinstance(data, dict):
+
+            for key in (
+                "data",
+                "matches",
+                "fixtures",
+                "events",
+                "results",
+            ):
+
+                if isinstance(
+                    data.get(key),
+                    list,
+                ):
+
+                    raw = data[key]
+                    break
+
+        events = []
+
+        for item in raw:
+
+            try:
+                events.append(
+                    normalize_openfoot(
+                        item
+                    )
+                )
+
+            except Exception:
+                pass
+
+        return source_result(
+            "OpenFoot",
+            events=events,
+            ok=True,
+            status=response.status_code,
+            elapsed=time.perf_counter() - start,
+        )
+
+    except Exception as exc:
+
+        return source_result(
+            "OpenFoot",
+            ok=False,
+            error=str(exc),
             elapsed=time.perf_counter() - start,
         )
 
@@ -1707,37 +1444,55 @@ def fetch_tsdb():
 # ============================================================
 
 SOURCE_FUNCTIONS = [
-
-    (
-        "ESPN",
-        fetch_espn,
-    ),
-
-    (
-        "5Dollar",
-        fetch_5dollar,
-    ),
-
-    (
-        "OpenFoot",
-        fetch_openfoot,
-    ),
-
-    (
-        "FootballData",
-        fetch_football_data,
-    ),
-
-    (
-        "APIFootball",
-        fetch_api_football,
-    ),
-
-    (
-        "TheSportsDB",
-        fetch_tsdb,
-    ),
+    ("ESPN", fetch_espn),
+    ("5Dollar", fetch_5dollar),
+    ("OpenFoot", fetch_openfoot),
+    ("FootballData", fetch_football_data),
+    ("APIFootball", fetch_api_football),
+    ("TheSportsDB", fetch_tsdb),
 ]
+
+
+# ============================================================
+# ESTATÍSTICAS
+# ============================================================
+
+def register_source(result):
+
+    name = result["source"]
+
+    stats = st.session_state.source_stats.setdefault(
+        name,
+        {
+            "calls": 0,
+            "ok": 0,
+            "errors": 0,
+            "last_status": None,
+            "last_error": "",
+            "last_ms": 0,
+        },
+    )
+
+    stats["calls"] += 1
+
+    stats["last_status"] = result.get(
+        "status"
+    )
+
+    stats["last_error"] = result.get(
+        "error",
+        "",
+    )
+
+    if result.get("ok"):
+        stats["ok"] += 1
+    else:
+        stats["errors"] += 1
+
+    stats["last_ms"] = round(
+        result.get("elapsed", 0) * 1000,
+        1,
+    )
 
 
 # ============================================================
@@ -1753,9 +1508,9 @@ def detect_goals(events):
         cache_key = ev["id"]
 
         previous = (
-            st.session_state
-            .score_cache
-            .get(cache_key)
+            st.session_state.score_cache.get(
+                cache_key
+            )
         )
 
         current_home = ev[
@@ -1782,31 +1537,23 @@ def detect_goals(events):
                 current_away != old_away
             )
 
-            if changed:
+            goals_added = (
+                current_home - old_home
+                +
+                current_away - old_away
+            )
 
-                goals_added = (
-                    current_home
-                    - old_home
-                    +
-                    current_away
-                    - old_away
-                )
+            if changed and goals_added > 0:
 
-                if goals_added > 0:
-
-                    detected.append({
-
+                detected.append(
+                    {
                         "event": ev,
-
                         "old_score":
                             previous["score"],
-
                         "new_score":
                             ev["score"],
-
-                        "detected_at":
-                            ev["received_at"],
-                    })
+                    }
+                )
 
         st.session_state.score_cache[
             cache_key
@@ -1816,70 +1563,13 @@ def detect_goals(events):
 
 
 # ============================================================
-# RANKING DE CHEGADA
-# ============================================================
-
-def ranking_sources(events):
-
-    if not events:
-        return []
-
-    return sorted(
-        events,
-        key=lambda x:
-            x["received_at"],
-    )
-
-
-# ============================================================
 # OPENROUTER
 # ============================================================
-
-def openrouter_prompt(goal):
-
-    ev = goal["event"]
-
-    return f"""
-Analise objetivamente o impacto deste gol.
-
-Jogo:
-{ev['home']} x {ev['away']}
-
-Placar anterior:
-{goal['old_score']}
-
-Novo placar:
-{goal['new_score']}
-
-Minuto:
-{ev.get('minute') or ev.get('status') or 'não informado'}
-
-Liga:
-{ev.get('league') or 'não informada'}
-
-Fonte:
-{ev['source']}
-
-Não invente estatísticas.
-
-Responda em português com:
-
-1. Impacto do gol
-2. Cenário do jogo
-3. Mercados que merecem observação
-4. Principais riscos
-
-Não trate a análise como garantia de resultado.
-""".strip()
-
 
 def analyze_goal(goal):
 
     if not OPENROUTER_API_KEY:
-
-        return (
-            "OpenRouter não configurado."
-        )
+        return "OpenRouter não configurado."
 
     ev = goal["event"]
 
@@ -1888,47 +1578,50 @@ def analyze_goal(goal):
         goal["new_score"],
     )
 
-    if (
-        cache_key
-        in st.session_state.analysis_cache
-    ):
-
-        return st.session_state.analysis_cache[
+    cached = (
+        st.session_state.analysis_cache.get(
             cache_key
-        ]
+        )
+    )
+
+    if cached:
+        return cached
+
+    prompt = (
+        "Analise objetivamente um gol em uma "
+        "partida de futebol.\n\n"
+        f"Jogo: {ev['home']} x {ev['away']}\n"
+        f"Placar anterior: {goal['old_score']}\n"
+        f"Novo placar: {goal['new_score']}\n"
+        f"Minuto: {ev.get('minute') or '-'}\n"
+        f"Liga: {ev.get('league') or '-'}\n"
+        f"Fonte: {ev['source']}\n\n"
+        "Responda em português:\n"
+        "1. Impacto do gol\n"
+        "2. Cenário do jogo\n"
+        "3. Mercados que merecem observação\n"
+        "4. Riscos\n\n"
+        "Não invente estatísticas e não trate "
+        "qualquer cenário como garantia."
+    )
 
     payload = {
-
-        "model":
-            OPENROUTER_MODEL,
-
+        "model": OPENROUTER_MODEL,
         "messages": [
-
             {
-                "role":
-                    "system",
-
-                "content":
-                    (
-                        "Você é um analista "
-                        "estatístico de futebol."
-                    ),
+                "role": "system",
+                "content": (
+                    "Você é um analista "
+                    "estatístico de futebol."
+                ),
             },
-
             {
-                "role":
-                    "user",
-
-                "content":
-                    openrouter_prompt(goal),
+                "role": "user",
+                "content": prompt,
             },
         ],
-
-        "temperature":
-            0.2,
-
-        "max_tokens":
-            400,
+        "temperature": 0.2,
+        "max_tokens": 400,
     }
 
     try:
@@ -1938,16 +1631,12 @@ def analyze_goal(goal):
             "https://openrouter.ai/api/v1/chat/completions",
 
             headers={
-
                 "Authorization":
                     f"Bearer {OPENROUTER_API_KEY}",
-
                 "Content-Type":
                     "application/json",
-
                 "HTTP-Referer":
                     "https://streamlit.io",
-
                 "X-Title":
                     "Football Scanner",
             },
@@ -1958,11 +1647,9 @@ def analyze_goal(goal):
         )
 
         try:
-
             data = response.json()
 
         except Exception:
-
             data = {}
 
         if response.status_code >= 400:
@@ -1979,15 +1666,12 @@ def analyze_goal(goal):
         )
 
         if not choices:
-
-            return (
-                "OpenRouter não retornou "
-                "uma resposta."
-            )
+            return "OpenRouter não retornou resposta."
 
         message = (
-            choices[0]
-            .get("message")
+            choices[0].get(
+                "message"
+            )
             or {}
         )
 
@@ -2004,9 +1688,7 @@ def analyze_goal(goal):
 
     except Exception as exc:
 
-        return (
-            f"Erro OpenRouter: {exc}"
-        )
+        return f"Erro OpenRouter: {exc}"
 
 
 # ============================================================
@@ -2016,18 +1698,10 @@ def analyze_goal(goal):
 def telegram_send(message):
 
     if not TELEGRAM_BOT_TOKEN:
-
-        return False, (
-            "TELEGRAM_BOT_TOKEN "
-            "não configurado."
-        )
+        return False, "Bot Telegram não configurado."
 
     if not TELEGRAM_CHAT_ID:
-
-        return False, (
-            "TELEGRAM_CHAT_ID "
-            "não configurado."
-        )
+        return False, "Chat ID do Telegram não configurado."
 
     try:
 
@@ -2040,24 +1714,15 @@ def telegram_send(message):
             ),
 
             json={
-
-                "chat_id":
-                    TELEGRAM_CHAT_ID,
-
-                "text":
-                    message,
-
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": message,
             },
 
             timeout=10,
         )
 
         if response.status_code >= 400:
-
-            return (
-                False,
-                response.text[:300],
-            )
+            return False, response.text[:300]
 
         return True, "OK"
 
@@ -2066,34 +1731,8 @@ def telegram_send(message):
         return False, str(exc)
 
 
-def notify_goal(goal, ai_text=""):
-
-    ev = goal["event"]
-
-    message = (
-        "⚽ GOL DETECTADO\n\n"
-        f"{ev['home']} "
-        f"{goal['new_score']} "
-        f"{ev['away']}\n\n"
-        f"Fonte: {ev['source']}\n"
-        f"Minuto: "
-        f"{ev.get('minute') or ev.get('status') or '-'}"
-    )
-
-    if ai_text:
-
-        message += (
-            "\n\n🤖 IA:\n"
-            + ai_text[:2500]
-        )
-
-    return telegram_send(
-        message
-    )
-
-
 # ============================================================
-# CICLO
+# CICLO PRINCIPAL
 # ============================================================
 
 def run_cycle():
@@ -2102,18 +1741,15 @@ def run_cycle():
 
     results = []
 
-    # TODAS AS FONTES SIMULTÂNEAS
+    # TODAS AS FONTES AO MESMO TEMPO
     with ThreadPoolExecutor(
         max_workers=SOURCE_WORKERS
     ) as executor:
 
         futures = {
-
             executor.submit(
                 function
-            ):
-                name
-
+            ): name
             for name, function
             in SOURCE_FUNCTIONS
         }
@@ -2122,34 +1758,23 @@ def run_cycle():
             futures
         ):
 
-            name = futures[
-                future
-            ]
+            name = futures[future]
 
             try:
 
-                result = (
-                    future.result()
-                )
+                result = future.result()
 
             except Exception as exc:
 
                 result = source_result(
-
                     name,
-
                     ok=False,
-
                     error=str(exc),
                 )
 
-            register_source(
-                result
-            )
+            register_source(result)
 
-            results.append(
-                result
-            )
+            results.append(result)
 
     events = []
 
@@ -2158,7 +1783,7 @@ def run_cycle():
         events.extend(
             result.get(
                 "events",
-                [],
+                []
             )
         )
 
@@ -2166,8 +1791,10 @@ def run_cycle():
         events
     )
 
-    ranking = ranking_sources(
-        events
+    ranking = sorted(
+        events,
+        key=lambda x:
+            x["received_at"],
     )
 
     elapsed = (
@@ -2176,32 +1803,19 @@ def run_cycle():
     )
 
     st.session_state.last_cycle = {
-
-        "time":
-            agora(),
-
-        "utc":
-            utc_now(),
-
-        "elapsed":
-            elapsed,
-
-        "events":
-            len(events),
-
-        "goals":
-            len(goals),
+        "time": agora(),
+        "elapsed": elapsed,
+        "events": len(events),
+        "goals": len(goals),
     }
 
-    # Processa gols
     for goal in goals:
 
         ev = goal["event"]
 
         goal_id = (
-            f"{ev['home']}"
-            f"|{ev['away']}"
-            f"|{goal['new_score']}"
+            f"{ev['id']}|"
+            f"{goal['new_score']}"
         )
 
         if (
@@ -2217,7 +1831,6 @@ def run_cycle():
         ai_text = ""
 
         if OPENROUTER_API_KEY:
-
             ai_text = analyze_goal(
                 goal
             )
@@ -2229,46 +1842,50 @@ def run_cycle():
             and TELEGRAM_CHAT_ID
         ):
 
-            ok, message = notify_goal(
-                goal,
-                ai_text,
+            message = (
+                "⚽ GOL DETECTADO\n\n"
+                f"{ev['home']} "
+                f"{goal['new_score']} "
+                f"{ev['away']}\n"
+                f"Fonte: {ev['source']}\n"
+                f"Minuto: "
+                f"{ev.get('minute') or '-'}"
+            )
+
+            if ai_text:
+                message += (
+                    "\n\n🤖 IA:\n"
+                    + ai_text[:2000]
+                )
+
+            ok, tg_message = telegram_send(
+                message
             )
 
             telegram_status = (
                 "Enviado"
                 if ok
-                else message
+                else tg_message
             )
 
         st.session_state.goal_history.insert(
-
             0,
-
             {
-                "Hora":
-                    agora(),
-
+                "Hora": agora(),
                 "Jogo":
                     f"{ev['home']} x "
                     f"{ev['away']}",
-
                 "Placar":
                     goal["new_score"],
-
                 "Fonte":
                     ev["source"],
-
                 "Minuto":
-                    ev.get("minute")
-                    or ev.get("status")
-                    or "-",
-
+                    ev.get("minute") or "-",
                 "Telegram":
                     telegram_status,
             },
         )
 
-    # Não deixar a sessão crescer indefinidamente
     st.session_state.goal_history = (
         st.session_state.goal_history[:50]
     )
@@ -2287,56 +1904,38 @@ def run_cycle():
 
 with st.sidebar:
 
-    st.header(
-        "⚙️ Configuração"
-    )
+    st.header("⚙️ Configuração")
 
     intervalo = st.number_input(
-
-        "Atualização",
-
+        "Intervalo",
         min_value=MIN_INTERVAL,
-
         max_value=MAX_INTERVAL,
-
         value=DEFAULT_INTERVAL,
-
         step=1,
     )
 
     auto_refresh = st.checkbox(
-
         "Atualização automática",
-
         value=True,
     )
 
     st.divider()
 
-    st.subheader(
-        "🔑 Fontes"
-    )
+    st.subheader("🔑 Fontes configuradas")
 
-    keys = {
-
+    source_keys = {
         "5Dollar":
             bool(FIVEDOLLAR_KEY),
-
         "OpenFoot":
             bool(OPENFOOT_KEY),
-
         "FootballData":
             bool(FOOTBALL_DATA_TOKEN),
-
         "API-Football":
             bool(API_FOOTBALL_KEY),
-
         "TheSportsDB":
             bool(THESPORTSDB_KEY),
-
         "OpenRouter":
             bool(OPENROUTER_API_KEY),
-
         "Telegram":
             bool(
                 TELEGRAM_BOT_TOKEN
@@ -2344,16 +1943,13 @@ with st.sidebar:
             ),
     }
 
-    for name, enabled in keys.items():
+    for name, active in source_keys.items():
 
-        if enabled:
-
+        if active:
             st.write(
                 f"🟢 {name}"
             )
-
         else:
-
             st.write(
                 f"⚪ {name}"
             )
@@ -2367,8 +1963,7 @@ with st.sidebar:
     ):
 
         remaining = int(
-            st.session_state
-            .espn_block_until
+            st.session_state.espn_block_until
             - time.time()
         )
 
@@ -2386,7 +1981,7 @@ with st.sidebar:
 
 
 # ============================================================
-# EXECUTA CICLO
+# EXECUTAR
 # ============================================================
 
 results, events, goals, ranking = (
@@ -2403,8 +1998,8 @@ st.title(
 )
 
 st.caption(
-    "Monitoramento simultâneo "
-    "de múltiplas fontes"
+    "Monitoramento simultâneo de "
+    "fontes de futebol ao vivo"
 )
 
 
@@ -2424,9 +2019,7 @@ error_count = (
 )
 
 cycle_time = (
-    st.session_state.last_cycle[
-        "elapsed"
-    ]
+    st.session_state.last_cycle["elapsed"]
     if st.session_state.last_cycle
     else 0
 )
@@ -2436,37 +2029,32 @@ col1, col2, col3, col4, col5 = (
 )
 
 with col1:
-
     st.metric(
         "Fontes OK",
         ok_count,
     )
 
 with col2:
-
     st.metric(
-        "Fontes com erro",
+        "Erros",
         error_count,
     )
 
 with col3:
-
     st.metric(
         "Jogos",
         len(events),
     )
 
 with col4:
-
     st.metric(
         "Gols novos",
         len(goals),
     )
 
 with col5:
-
     st.metric(
-        "Ciclo",
+        "Tempo",
         f"{cycle_time:.2f}s",
     )
 
@@ -2493,13 +2081,12 @@ else:
         ev = goal["event"]
 
         st.success(
-
-            f"⚽ **{ev['home']} "
+            f"⚽ {ev['home']} "
             f"{goal['new_score']} "
-            f"{ev['away']}** "
-            f"| {ev['source']} "
-            f"| "
-            f"{ev.get('minute') or ev.get('status') or '-'}"
+            f"{ev['away']} | "
+            f"Fonte: {ev['source']} | "
+            f"Minuto: "
+            f"{ev.get('minute') or '-'}"
         )
 
         if OPENROUTER_API_KEY:
@@ -2516,17 +2103,16 @@ else:
 
 
 # ============================================================
-# RANKING DE CHEGADA
+# RANKING
 # ============================================================
 
 st.subheader(
-    "🏁 Quem chegou primeiro?"
+    "🏁 Ranking de chegada das fontes"
 )
 
 st.caption(
-    "A posição é baseada no instante "
-    "absoluto em que cada resposta foi "
-    "recebida neste ciclo."
+    "Compara o instante absoluto em que "
+    "cada resposta foi recebida pelo scanner."
 )
 
 if ranking:
@@ -2535,53 +2121,42 @@ if ranking:
         "received_at"
     ]
 
-    ranking_rows = []
+    rows = []
 
-    for pos, ev in enumerate(
-        ranking[:50],
+    for position, ev in enumerate(
+        ranking[:100],
         start=1,
     ):
 
-        delta = (
+        difference = (
             ev["received_at"]
             - first_time
         ) * 1000
 
-        ranking_rows.append(
-
+        rows.append(
             {
-                "#":
-                    pos,
-
-                "Fonte":
-                    ev["source"],
-
+                "#": position,
+                "Fonte": ev["source"],
                 "Jogo":
-                    f"{ev['home']} "
-                    f"x {ev['away']}",
-
+                    f"{ev['home']} x "
+                    f"{ev['away']}",
                 "Placar":
                     ev["score"],
-
                 "Diferença":
-                    f"{delta:.0f} ms",
+                    f"{difference:.0f} ms",
             }
         )
 
     st.dataframe(
-
-        ranking_rows,
-
+        rows,
         use_container_width=True,
-
         hide_index=True,
     )
 
 else:
 
     st.info(
-        "Nenhuma fonte retornou "
-        "jogos neste ciclo."
+        "Nenhum jogo retornado."
     )
 
 
@@ -2602,7 +2177,6 @@ for result in sorted(
 ):
 
     status_rows.append(
-
         {
             "Fonte":
                 result["source"],
@@ -2627,13 +2201,7 @@ for result in sorted(
                 ),
 
             "Tempo":
-                (
-                    f"{result['elapsed'] * 1000:.0f} ms"
-                    if result.get(
-                        "elapsed"
-                    ) is not None
-                    else "-"
-                ),
+                f"{result.get('elapsed', 0) * 1000:.0f} ms",
 
             "Erro":
                 result.get(
@@ -2644,11 +2212,8 @@ for result in sorted(
     )
 
 st.dataframe(
-
     status_rows,
-
     use_container_width=True,
-
     hide_index=True,
 )
 
@@ -2665,18 +2230,9 @@ if events:
 
     game_rows = []
 
-    for ev in sorted(
-
-        events,
-
-        key=lambda x: (
-            x["home"].lower(),
-            x["away"].lower(),
-        ),
-    ):
+    for ev in events:
 
         game_rows.append(
-
             {
                 "Fonte":
                     ev["source"],
@@ -2691,43 +2247,34 @@ if events:
                     ev["away"],
 
                 "Minuto":
-                    ev.get(
-                        "minute"
-                    )
+                    ev.get("minute")
                     or "-",
 
                 "Status":
-                    ev.get(
-                        "status"
-                    )
+                    ev.get("status")
                     or "-",
 
                 "Liga":
-                    ev.get(
-                        "league"
-                    )
+                    ev.get("league")
                     or "-",
             }
         )
 
     st.dataframe(
-
         game_rows,
-
         use_container_width=True,
-
         hide_index=True,
     )
 
 else:
 
     st.info(
-        "Nenhum jogo retornado."
+        "Nenhum jogo retornado pelas fontes."
     )
 
 
 # ============================================================
-# HISTÓRICO DE GOLS
+# HISTÓRICO
 # ============================================================
 
 st.subheader(
@@ -2737,19 +2284,15 @@ st.subheader(
 if st.session_state.goal_history:
 
     st.dataframe(
-
         st.session_state.goal_history,
-
         use_container_width=True,
-
         hide_index=True,
     )
 
 else:
 
     st.info(
-        "Nenhum gol detectado "
-        "nesta sessão."
+        "Nenhum gol detectado nesta sessão."
     )
 
 
@@ -2758,16 +2301,11 @@ else:
 # ============================================================
 
 with st.expander(
-    "🔐 Configuração das chaves"
+    "🔐 Como configurar as chaves"
 ):
 
-    st.markdown(
+    st.code(
         """
-### Streamlit Secrets
-
-No Streamlit Cloud, coloque as chaves nos **Secrets**:
-
-```toml
 FOOTBALL_DATA_API_TOKEN = "SUA_CHAVE"
 
 FIVEDOLLAR_FOOTBALL_API_KEY = "SUA_CHAVE"
@@ -2785,3 +2323,44 @@ OPENROUTER_MODEL = "openrouter/free"
 TELEGRAM_BOT_TOKEN = "SEU_TOKEN"
 
 TELEGRAM_CHAT_ID = "SEU_CHAT_ID"
+""".strip(),
+        language="toml",
+    )
+
+    st.write(
+        "Configure essas variáveis em "
+        "Settings → Secrets no Streamlit Cloud."
+    )
+
+
+# ============================================================
+# RODAPÉ
+# ============================================================
+
+if st.session_state.last_cycle:
+
+    ultima_hora = (
+        st.session_state.last_cycle["time"]
+    )
+
+else:
+
+    ultima_hora = agora()
+
+st.caption(
+    f"Último ciclo: {ultima_hora} | "
+    f"Próxima atualização em {intervalo}s"
+)
+
+
+# ============================================================
+# AUTO REFRESH
+# ============================================================
+
+if auto_refresh:
+
+    time.sleep(
+        int(intervalo)
+    )
+
+    st.rerun()
